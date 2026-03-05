@@ -1,0 +1,313 @@
+---
+title: "Plugin"
+description: "Composable capability system for agents"
+---
+
+## Overview
+
+A Plugin is a composable capability that can be attached to an agent. Plugins encapsulate:
+
+- A set of actions the agent can perform
+- State schema for plugin-specific data (nested under `state_key`)
+- Configuration schema for per-agent customization
+- Signal routing rules
+- Optional lifecycle hooks and child processes
+
+## Lifecycle
+
+1. **Compile-time**: Plugin is declared in agent's `plugins:` option
+2. **Agent.new/1**: `mount/2` is called to initialize plugin state (pure)
+3. **AgentServer.init/1**: `child_spec/1` processes are started and monitored
+4. **Signal processing**: `handle_signal/2` runs before routing, can override or abort
+5. **After cmd/2 (call path)**: `transform_result/3` wraps call results
+
+## Configuration Options
+
+<ParamField path="name" type="string" required>
+  The plugin name. Must contain only letters, numbers, and underscores.
+</ParamField>
+
+<ParamField path="state_key" type="atom" required>
+  Atom key for plugin state in agent.
+</ParamField>
+
+<ParamField path="actions" type="list(module)" required>
+  List of action modules provided by this plugin.
+</ParamField>
+
+<ParamField path="description" type="string">
+  Description of what the plugin does.
+</ParamField>
+
+<ParamField path="category" type="string">
+  Category for organization.
+</ParamField>
+
+<ParamField path="vsn" type="string">
+  Version string.
+</ParamField>
+
+<ParamField path="schema" type="Zoi.schema()">
+  Zoi schema for plugin state validation.
+</ParamField>
+
+<ParamField path="config_schema" type="Zoi.schema()">
+  Zoi schema for per-agent configuration.
+</ParamField>
+
+<ParamField path="signal_patterns" type="list(string)" default="[]">
+  List of signal pattern strings for routing.
+</ParamField>
+
+<ParamField path="tags" type="list(string)" default="[]">
+  Tags for categorization.
+</ParamField>
+
+<ParamField path="capabilities" type="list(atom)" default="[]">
+  Capabilities provided by this plugin.
+</ParamField>
+
+<ParamField path="requires" type="list(tuple)" default="[]">
+  Requirements like `{:config, :token}`, `{:app, :req}`, `{:plugin, :http}`.
+</ParamField>
+
+<ParamField path="signal_routes" type="list(tuple)" default="[]">
+  Signal route tuples like `{"post", ActionModule}`.
+</ParamField>
+
+<ParamField path="schedules" type="list(tuple)" default="[]">
+  Schedule tuples like `{"*/5 * * * *", ActionModule}`.
+</ParamField>
+
+<ParamField path="singleton" type="boolean" default="false">
+  If true, plugin cannot be aliased or duplicated.
+</ParamField>
+
+## Callbacks
+
+### mount/2
+
+Called when the plugin is mounted to an agent during `new/1`. Pure function - no side effects.
+
+<ParamField path="agent" type="Agent.t()" required>
+  The agent struct (with state from previously mounted plugins).
+</ParamField>
+
+<ParamField path="config" type="map" required>
+  Per-agent configuration for this plugin.
+</ParamField>
+
+<ResponseField name="return" type="{:ok, map() | nil} | {:error, term()}">
+  Map to merge into plugin's state slice, or error.
+</ResponseField>
+
+```elixir
+def mount(_agent, config) do
+  {:ok, %{initialized_at: DateTime.utc_now(), api_key: config[:api_key]}}
+end
+```
+
+### signal_routes/1
+
+Returns dynamic signal routes for this plugin. Prefer compile-time `signal_routes:` option for static routes.
+
+<ParamField path="config" type="map" required>
+  Per-agent configuration.
+</ParamField>
+
+<ResponseField name="return" type="list(tuple)">
+  List of signal route tuples.
+</ResponseField>
+
+### handle_signal/2
+
+Pre-routing hook called before signal routing. Can inspect, log, transform, or override signal handling.
+
+<ParamField path="signal" type="Signal.t()" required>
+  The incoming signal (may be modified by earlier plugins).
+</ParamField>
+
+<ParamField path="context" type="map" required>
+  Context with `:agent`, `:agent_module`, `:plugin`, `:plugin_spec`, `:plugin_instance`, `:config`.
+</ParamField>
+
+<ResponseField name="return" type="{:ok, term()} | {:ok, {:override, term()}} | {:error, term()}">
+  Continue, override, or abort signal processing.
+</ResponseField>
+
+**Return values:**
+- `{:ok, nil}` or `{:ok, :continue}` - Continue to normal routing
+- `{:ok, {:continue, %Signal{}}}` - Rewrite the signal and continue routing
+- `{:ok, {:override, action_spec}}` - Bypass router, use this action instead
+- `{:ok, {:override, action_spec, %Signal{}}}` - Bypass router with rewritten signal
+- `{:error, reason}` - Abort signal processing with error
+
+```elixir
+def handle_signal(signal, _context) do
+  if signal.type == "admin.override" do
+    {:ok, {:override, MyApp.AdminAction}}
+  else
+    {:ok, :continue}
+  end
+end
+```
+
+### transform_result/3
+
+Caller view transform for the agent returned from `AgentServer.call/3`. Only affects synchronous call path.
+
+<ParamField path="action" type="module | string" required>
+  The resolved action module that was executed.
+</ParamField>
+
+<ParamField path="result" type="Agent.t()" required>
+  The agent struct to transform.
+</ParamField>
+
+<ParamField path="context" type="map" required>
+  Context with plugin metadata.
+</ParamField>
+
+<ResponseField name="return" type="Agent.t()">
+  Transformed agent struct.
+</ResponseField>
+
+```elixir
+def transform_result(_action, agent, _context) do
+  new_state = Map.put(agent.state, :last_call_at, DateTime.utc_now())
+  %{agent | state: new_state}
+end
+```
+
+### child_spec/1
+
+Returns child specification(s) for supervised processes.
+
+<ParamField path="config" type="map" required>
+  Per-agent configuration.
+</ParamField>
+
+<ResponseField name="return" type="nil | Supervisor.child_spec() | list(Supervisor.child_spec())">
+  Child specs to start and monitor.
+</ResponseField>
+
+```elixir
+def child_spec(config) do
+  %{
+    id: {__MODULE__, :worker},
+    start: {MyWorker, :start_link, [config]}
+  }
+end
+```
+
+### subscriptions/2
+
+Returns bus subscriptions for this plugin.
+
+<ParamField path="config" type="map" required>
+  Per-agent configuration.
+</ParamField>
+
+<ParamField path="context" type="map" required>
+  Context with `:agent_id`, `:agent_module`.
+</ParamField>
+
+<ResponseField name="return" type="list({module, keyword | map})">
+  List of adapter and options tuples.
+</ResponseField>
+
+```elixir
+def subscriptions(_config, context) do
+  [
+    {Jido.Bus.Adapters.Local, topic: "events.*"},
+    {Jido.Bus.Adapters.PubSub, pubsub: MyApp.PubSub, topic: context.agent_id}
+  ]
+end
+```
+
+### on_checkpoint/2
+
+Determines how plugin state should be persisted during checkpoint.
+
+<ParamField path="plugin_state" type="any" required>
+  The plugin's current state slice.
+</ParamField>
+
+<ParamField path="context" type="map" required>
+  Checkpoint context.
+</ParamField>
+
+<ResponseField name="return" type=":keep | :drop | {:externalize, atom, any}">
+  Persistence strategy.
+</ResponseField>
+
+**Strategies:**
+- `:keep` - Include in checkpoint state as-is (default)
+- `:drop` - Exclude from checkpoint (transient/ephemeral state)
+- `{:externalize, key, pointer}` - Strip from checkpoint and store pointer
+
+```elixir
+def on_checkpoint(%Thread{} = thread, _ctx) do
+  {:externalize, :thread, %{id: thread.id, rev: thread.rev}}
+end
+```
+
+### on_restore/2
+
+Rehydrates externalized plugin state during restore.
+
+<ParamField path="pointer" type="any" required>
+  The pointer stored during checkpoint.
+</ParamField>
+
+<ParamField path="context" type="map" required>
+  Restore context.
+</ParamField>
+
+<ResponseField name="return" type="{:ok, any} | {:error, term}">
+  Restored state or error.
+</ResponseField>
+
+```elixir
+def on_restore(pointer, _context) do
+  {:ok, load_thread_from_storage(pointer.id)}
+end
+```
+
+## Example Plugin
+
+```elixir
+defmodule MyApp.ChatPlugin do
+  use Jido.Plugin,
+    name: "chat",
+    state_key: :chat,
+    actions: [MyApp.Actions.SendMessage, MyApp.Actions.ListHistory],
+    schema: Zoi.object(%{
+      messages: Zoi.list(Zoi.any()) |> Zoi.default([]),
+      model: Zoi.string() |> Zoi.default("gpt-4")
+    }),
+    signal_patterns: ["chat.*"],
+    signal_routes: [
+      {"chat.send", MyApp.Actions.SendMessage},
+      {"chat.history", MyApp.Actions.ListHistory}
+    ]
+
+  @impl Jido.Plugin
+  def mount(agent, config) do
+    {:ok, %{initialized_at: DateTime.utc_now()}}
+  end
+end
+```
+
+## Using Plugins
+
+```elixir
+defmodule MyAgent do
+  use Jido.Agent,
+    name: "my_agent",
+    plugins: [
+      MyApp.ChatPlugin,
+      {MyApp.DatabasePlugin, %{pool_size: 5}}
+    ]
+end
+```

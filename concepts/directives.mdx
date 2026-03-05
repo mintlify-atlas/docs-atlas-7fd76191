@@ -1,0 +1,326 @@
+---
+title: Directives
+description: Learn about Directives, pure descriptions of external effects
+---
+
+Directives are **pure descriptions of external effects**. Agents emit them from `cmd/2` callbacks; the runtime (`AgentServer`) executes them.
+
+<Note>
+**Key principle**: Directives never mutate state directly; state changes happen through `cmd/2` return values (including `result_action` callbacks used by `RunInstruction`).
+</Note>
+
+## Directives vs State Operations
+
+Jido separates two distinct concerns:
+
+| Concept | Module | Purpose | Handled By |
+|---------|--------|---------|------------|
+| **Directives** | `Jido.Agent.Directive` | External effects (emit signals, spawn processes) | Runtime (AgentServer) |
+| **State Operations** | `Jido.Agent.StateOp` | Internal state transitions (set, replace, delete) | Strategy layer |
+
+State operations are applied during `cmd/2` and never leave the strategy layer. Directives are passed through to the runtime for execution.
+
+```elixir
+def cmd({:notify_user, message}, agent, _context) do
+  signal = Jido.Signal.new!("notification.sent", %{message: message}, source: "/agent")
+  
+  {:ok, agent, [Directive.emit(signal)]}
+end
+```
+
+<Tip>
+See the [State Operations guide](/concepts/state-operations) for details on `SetState`, `SetPath`, and other state ops.
+</Tip>
+
+## Core Directives
+
+<ParamField path="Emit" type="Directive">
+  Dispatch a signal via configured adapters
+  
+  **Tracking:** None
+</ParamField>
+
+<ParamField path="Error" type="Directive">
+  Signal an error from cmd/2
+  
+  **Tracking:** None
+</ParamField>
+
+<ParamField path="Spawn" type="Directive">
+  Spawn generic BEAM child process
+  
+  **Tracking:** None (fire-and-forget)
+</ParamField>
+
+<ParamField path="SpawnAgent" type="Directive">
+  Spawn child Jido agent with hierarchy
+  
+  **Tracking:** Full (monitoring, exit signals)
+</ParamField>
+
+<ParamField path="StopChild" type="Directive">
+  Gracefully stop a tracked child agent
+  
+  **Tracking:** Uses children map
+</ParamField>
+
+<ParamField path="Schedule" type="Directive">
+  Schedule a delayed message
+  
+  **Tracking:** None
+</ParamField>
+
+<ParamField path="RunInstruction" type="Directive">
+  Execute `%Instruction{}` at runtime and route result back through `cmd/2`
+  
+  **Tracking:** None
+</ParamField>
+
+<ParamField path="Stop" type="Directive">
+  Stop the agent process (self)
+  
+  **Tracking:** None
+</ParamField>
+
+<ParamField path="Cron" type="Directive">
+  Recurring scheduled execution
+  
+  **Tracking:** Job tracking
+</ParamField>
+
+<ParamField path="CronCancel" type="Directive">
+  Cancel a cron job
+  
+  **Tracking:** Job tracking
+</ParamField>
+
+## Helper Constructors
+
+### Emit Signals
+
+```elixir
+alias Jido.Agent.Directive
+
+Directive.emit(signal)
+Directive.emit(signal, {:pubsub, topic: "events"})
+Directive.emit_to_pid(signal, pid)
+Directive.emit_to_parent(agent, signal)
+```
+
+### Spawn Processes
+
+```elixir
+Directive.spawn(child_spec)
+Directive.spawn_agent(MyWorkerAgent, :worker_1)
+Directive.spawn_agent(MyWorkerAgent, :processor, 
+  opts: %{initial_state: %{batch_size: 100}})
+```
+
+### Stop Processes
+
+```elixir
+Directive.stop_child(:worker_1)
+Directive.stop()
+Directive.stop(:shutdown)
+```
+
+### Scheduling
+
+```elixir
+Directive.schedule(5000, :timeout)
+Directive.cron("*/5 * * * *", :tick, job_id: :heartbeat)
+Directive.cron_cancel(:heartbeat)
+```
+
+### Runtime Instruction Execution
+
+```elixir
+Directive.run_instruction(instruction, result_action: :fsm_instruction_result)
+```
+
+### Errors
+
+```elixir
+Directive.error(Jido.Error.validation_error("Invalid input"))
+```
+
+## RunInstruction
+
+`RunInstruction` is used by strategies that keep `cmd/2` pure. Instead of calling `Jido.Exec.run/1` inline, the strategy emits `%Directive.RunInstruction{}` and the runtime executes it, then routes the result back through `cmd/2` using `result_action`.
+
+```elixir
+# In a strategy's cmd/3 callback:
+def cmd(agent, instructions, ctx) do
+  instruction = build_instruction(agent, instructions)
+  
+  directive = %Directive.RunInstruction{
+    instruction: instruction,
+    result_action: :strategy_instruction_result
+  }
+  
+  {agent, [directive]}
+end
+
+# Runtime executes instruction, then calls:
+# MyAgent.cmd(agent, {:strategy_instruction_result, result_payload})
+```
+
+<Warning>
+`RunInstruction` is primarily for advanced strategies like FSM that need to maintain purity. Most actions should execute logic directly in their `run/2` callback.
+</Warning>
+
+## Spawn vs SpawnAgent
+
+| `Spawn` | `SpawnAgent` |
+|---------|------------|
+| Generic Tasks/GenServers | Child Jido agents |
+| Fire-and-forget | Full hierarchy tracking |
+| No monitoring | Monitors child, receives exit signals |
+| — | Enables `emit_to_parent/3` |
+
+```elixir
+# Fire-and-forget task
+Directive.spawn({Task, :start_link, [fn -> send_webhook(url) end]})
+
+# Tracked child agent
+Directive.spawn_agent(WorkerAgent, :worker_1, opts: %{initial_state: state})
+```
+
+### Hierarchy Tracking with SpawnAgent
+
+When you spawn a child agent:
+
+1. Child's parent reference points to the spawning agent
+2. Parent monitors the child process
+3. Parent tracks child in its children map by tag
+4. Child exit signals are delivered to parent as `jido.agent.child.exit`
+
+```elixir
+defmodule CoordinatorAgent do
+  use Jido.Agent,
+    name: "coordinator",
+    schema: [workers: [type: {:list, :pid}, default: []]]
+
+  defmodule SpawnWorker do
+    use Jido.Action,
+      name: "spawn_worker",
+      schema: [worker_id: [type: :string, required: true]]
+
+    def run(%{worker_id: worker_id}, _context) do
+      {:ok, %{}, Directive.spawn_agent(WorkerAgent, worker_id)}
+    end
+  end
+end
+```
+
+## Custom Directives
+
+External packages can define their own directives:
+
+```elixir
+defmodule MyApp.Directive.CallLLM do
+  defstruct [:model, :prompt, :tag]
+end
+```
+
+The runtime dispatches on struct type — no core changes needed. Implement a custom `AgentServer` or middleware to handle your directive types.
+
+## Complete Example: Action → Directive Flow
+
+Here's a full example showing an action that processes an order and emits a signal:
+
+```elixir
+defmodule ProcessOrderAction do
+  use Jido.Action,
+    name: "process_order",
+    schema: [order_id: [type: :string, required: true]]
+
+  alias Jido.Agent.{Directive, StateOp}
+
+  def run(%{order_id: order_id}, context) do
+    signal = Jido.Signal.new!(
+      "order.processed",
+      %{order_id: order_id, processed_at: DateTime.utc_now()},
+      source: "/orders"
+    )
+
+    {:ok, %{order_id: order_id}, [
+      StateOp.set_state(%{last_order: order_id}),  # Applied by strategy
+      Directive.emit(signal)                        # Passed to runtime
+    ]}
+  end
+end
+```
+
+When the agent runs this action via `cmd/2`:
+1. The strategy applies `StateOp.set_state` — agent state is updated
+2. The `Emit` directive passes through to the runtime
+3. `AgentServer` dispatches the signal via configured adapters
+
+## API Reference
+
+### Emit
+
+<ParamField path="signal" type="Signal.t()" required>
+  The signal to dispatch
+</ParamField>
+
+<ParamField path="dispatch" type="tuple | list">
+  Dispatch config: `{adapter, opts}` or list of configs
+  
+  **Adapters:**
+  - `:pid` - Direct to process
+  - `:pubsub` - Via PubSub
+  - `:bus` - To signal bus
+  - `:http` / `:webhook` - HTTP endpoints
+  - `:logger` / `:console` / `:noop` - Logging/testing
+</ParamField>
+
+### SpawnAgent
+
+<ParamField path="agent" type="module | struct" required>
+  Agent module (atom) or pre-built agent struct to spawn
+</ParamField>
+
+<ParamField path="tag" type="any" required>
+  Tag for tracking this child (used as key in children map)
+</ParamField>
+
+<ParamField path="opts" type="map">
+  Additional options passed to child AgentServer
+</ParamField>
+
+<ParamField path="meta" type="map">
+  Metadata to pass to child via parent reference
+</ParamField>
+
+### Schedule
+
+<ParamField path="delay_ms" type="integer" required>
+  Delay in milliseconds (must be >= 0)
+</ParamField>
+
+<ParamField path="message" type="any" required>
+  Message to send after delay
+</ParamField>
+
+### RunInstruction
+
+<ParamField path="instruction" type="Instruction.t()" required>
+  The `%Jido.Instruction{}` to execute
+</ParamField>
+
+<ParamField path="result_action" type="atom | module" required>
+  Internal action atom/module for result handling in `cmd/2`
+</ParamField>
+
+<ParamField path="meta" type="map">
+  Optional metadata echoed in the result payload
+</ParamField>
+
+## Related Guides
+
+- [State Operations](/concepts/state-operations) — Internal state transitions
+- [Actions](/concepts/actions) — Returning directives from actions
+- [Signals](/concepts/signals) — Signal dispatch via Emit directive
+- [Strategies](/concepts/strategies) — Using RunInstruction in strategies

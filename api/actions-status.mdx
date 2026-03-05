@@ -1,0 +1,191 @@
+---
+title: "Actions.Status"
+description: "Agent status management actions"
+---
+
+## Overview
+
+Base actions for agent status management. These actions provide standard patterns for managing agent completion states, which integrate with `Jido.Await` for event-driven coordination.
+
+## Status Convention
+
+Jido agents use a `status` field in their state to signal completion:
+
+- `:idle` - Agent is waiting for work
+- `:working` - Agent is processing
+- `:completed` - Agent finished successfully
+- `:failed` - Agent encountered an error
+
+`Jido.Await` watches for `:completed` or `:failed` status to unblock waiters.
+
+## Actions
+
+### SetStatus
+
+Set the agent's status field to any value.
+
+<ParamField path="status" type="atom" required>
+  Status atom to set.
+</ParamField>
+
+```elixir
+{Jido.Actions.Status.SetStatus, %{status: :working}}
+```
+
+### MarkCompleted
+
+Mark the agent as completed with an optional result. Sets `status: :completed` and optionally `last_answer` with the result. This triggers `Jido.Await` waiters to unblock.
+
+<ParamField path="result" type="any">
+  Optional result value to store in `last_answer`.
+</ParamField>
+
+```elixir
+# Simple completion
+{"work.done", Jido.Actions.Status.MarkCompleted}
+
+# With result
+{Jido.Actions.Status.MarkCompleted, %{result: "Answer: 42"}}
+```
+
+### MarkFailed
+
+Mark the agent as failed with an error reason. Sets `status: :failed` and stores the error in the `error` field. This triggers `Jido.Await` waiters to unblock.
+
+<ParamField path="reason" type="any" default=":unknown_error">
+  Error reason.
+</ParamField>
+
+```elixir
+{"work.error", Jido.Actions.Status.MarkFailed}
+
+{Jido.Actions.Status.MarkFailed, %{reason: :timeout}}
+```
+
+### MarkWorking
+
+Mark the agent as actively working. Sets `status: :working` to indicate the agent is processing.
+
+<ParamField path="task_id" type="any">
+  Optional task identifier.
+</ParamField>
+
+```elixir
+{"work.start", Jido.Actions.Status.MarkWorking}
+```
+
+### MarkIdle
+
+Mark the agent as idle and ready for work. Sets `status: :idle` to indicate the agent is waiting.
+
+```elixir
+{"reset", Jido.Actions.Status.MarkIdle}
+```
+
+## Usage Example
+
+```elixir
+defmodule WorkerAgent do
+  use Jido.Agent,
+    name: "worker",
+    signal_routes: [
+      {"work.start", StartWorkAction},
+      {"work.complete", Jido.Actions.Status.MarkCompleted},
+      {"work.error", Jido.Actions.Status.MarkFailed},
+      {"work.reset", Jido.Actions.Status.MarkIdle}
+    ]
+end
+
+defmodule StartWorkAction do
+  use Jido.Action,
+    name: "start_work",
+    schema: [task_id: [type: :string, required: true]]
+
+  def run(%{task_id: task_id}, _context) do
+    {:ok, %{status: :working, current_task: task_id, started_at: DateTime.utc_now()}}
+  end
+end
+
+# Using with Jido.Await
+{:ok, pid} = Jido.Agent.start(WorkerAgent, name: "worker-1")
+
+# Start work
+Jido.Signal.emit(pid, "work.start", %{task_id: "task-123"})
+
+# Wait for completion
+case Jido.Await.completed(pid, timeout: 30_000) do
+  {:ok, agent} ->
+    IO.puts("Work completed: #{inspect(agent.state.last_answer)}")
+
+  {:error, :timeout} ->
+    IO.puts("Work timed out")
+
+  {:error, {:failed, reason}} ->
+    IO.puts("Work failed: #{inspect(reason)}")
+end
+```
+
+## Status Lifecycle
+
+```elixir
+defmodule CompleteWorkflow do
+  use Jido.Agent,
+    name: "workflow",
+    signal_routes: [
+      {"start", InitializeAction},
+      {"process", ProcessAction},
+      {"finalize", FinalizeAction},
+      {"error", Jido.Actions.Status.MarkFailed}
+    ]
+end
+
+defmodule InitializeAction do
+  use Jido.Action,
+    name: "initialize",
+    schema: []
+
+  def run(_params, _context) do
+    {:ok, %{status: :working, phase: :initializing}, [
+      Jido.Agent.Directive.emit(
+        Jido.Signal.new!("process", %{})
+      )
+    ]}
+  end
+end
+
+defmodule ProcessAction do
+  use Jido.Action,
+    name: "process",
+    schema: []
+
+  def run(_params, context) do
+    case do_processing(context.agent.state) do
+      {:ok, result} ->
+        {:ok, %{phase: :processing, result: result}, [
+          Jido.Agent.Directive.emit(
+            Jido.Signal.new!("finalize", %{result: result})
+          )
+        ]}
+
+      {:error, reason} ->
+        {:ok, %{}, [
+          Jido.Agent.Directive.emit(
+            Jido.Signal.new!("error", %{reason: reason})
+          )
+        ]}
+    end
+  end
+
+  defp do_processing(_state), do: {:ok, "processed data"}
+end
+
+defmodule FinalizeAction do
+  use Jido.Action,
+    name: "finalize",
+    schema: [result: [type: :any, required: true]]
+
+  def run(%{result: result}, _context) do
+    {:ok, %{status: :completed, last_answer: result, phase: :finalized}}
+  end
+end
+```

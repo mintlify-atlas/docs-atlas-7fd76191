@@ -1,0 +1,168 @@
+---
+title: "Strategy"
+description: "Behaviour for agent execution strategies"
+---
+
+## Overview
+
+The `Jido.Agent.Strategy` behaviour defines how agents execute actions. Strategies control the flow of instruction execution, enabling patterns from simple sequential execution to complex workflows like behavior trees or LLM chains of thought.
+
+## Core Contract
+
+Strategies implement these callbacks:
+
+```elixir
+cmd(agent, instructions, context) :: {agent, directives}
+init(agent, context) :: {agent, directives}
+tick(agent, context) :: {agent, directives}
+snapshot(agent, context) :: Strategy.Snapshot.t()
+```
+
+Only `cmd/3` is required. Others are optional with default implementations.
+
+## Lifecycle
+
+### init/2
+
+Called by `AgentServer` after agent creation and before the first `cmd/2`. Use this to initialize strategy-specific state.
+
+**Called in two contexts:**
+1. By `MyAgent.new/1` to initialize strategy state (directives are dropped)
+2. By `AgentServer` during startup to capture and process init directives
+
+Implementations should be **idempotent** since this may be called twice.
+
+### cmd/3
+
+Called by `MyAgent.cmd/2` to execute actions. This is the core execution method that must be implemented.
+
+**Parameters:**
+- `agent` - The current agent struct
+- `instructions` - List of normalized `Instruction` structs
+- `context` - Execution context with `:agent_module` and `:strategy_opts`
+
+**Returns:**
+- `{updated_agent, directives}` - The new agent state and external effects
+
+### tick/2
+
+Called by `AgentServer` when a strategy has scheduled a tick via `{:schedule, ms, :strategy_tick}`. Use for multi-step execution.
+
+## Snapshot Interface
+
+Strategies expose their state through `snapshot/2` which returns a `Strategy.Snapshot` struct:
+
+```elixir
+snap = MyStrategy.snapshot(agent, ctx)
+if snap.done?, do: snap.result
+```
+
+This provides a stable interface regardless of internal implementation.
+
+### Snapshot Fields
+
+- `status` - Coarse execution status (`:idle`, `:running`, `:waiting`, `:success`, `:failure`)
+- `done?` - Whether the strategy has reached a terminal state
+- `result` - The main output (if the strategy produces one)
+- `details` - Additional strategy-specific metadata
+
+## Configuration
+
+Set strategy at compile time:
+
+```elixir
+defmodule MyAgent do
+  use Jido.Agent,
+    name: "my_agent",
+    strategy: Jido.Agent.Strategy.Direct  # default
+end
+```
+
+Or with options:
+
+```elixir
+defmodule MyBTAgent do
+  use Jido.Agent,
+    name: "bt_agent",
+    strategy: {MyBehaviorTreeStrategy, max_depth: 5}
+end
+```
+
+## Built-in Strategies
+
+- [Direct](/api/strategy-direct) - Execute actions immediately (default)
+- [FSM](/api/strategy-fsm) - Finite state machine with configurable transitions
+
+## Custom Strategies
+
+Implement the behaviour and define `cmd/3`:
+
+```elixir
+defmodule MyCustomStrategy do
+  use Jido.Agent.Strategy
+
+  @impl true
+  def cmd(agent, instructions, ctx) do
+    # Custom execution logic
+    # Must return {updated_agent, directives}
+  end
+
+  # Optionally override init/2, tick/2, snapshot/2
+end
+```
+
+## Strategy State
+
+Strategy state should live inside `agent.state` under the reserved key `:__strategy__`. Use `Jido.Agent.Strategy.State` helpers to manage it.
+
+## Signal Routing
+
+Strategies can declare signal routes via the `signal_routes/1` callback:
+
+```elixir
+def signal_routes(_ctx) do
+  [
+    {"react.user_query", {:strategy_cmd, :react_start}},
+    {"ai.llm_result", {:strategy_cmd, :react_llm_result}},
+    {"ai.tool_result", {:strategy_cmd, :react_tool_result}}
+  ]
+end
+```
+
+### Route Targets
+
+- `{:strategy_cmd, action}` - Call `cmd(agent, [{action, signal.data}])`
+- `{:strategy_tick}` - Schedule a strategy tick
+- `{:custom, term}` - Custom handling (for extension)
+
+## Types
+
+### context
+
+```elixir
+%{
+  agent_module: module(),
+  strategy_opts: keyword()
+}
+```
+
+### status
+
+`:idle | :running | :waiting | :success | :failure`
+
+### action_spec
+
+```elixir
+%{
+  optional(:schema) => Zoi.schema() | keyword(),
+  optional(:doc) => String.t(),
+  optional(:name) => String.t()
+}
+```
+
+## Related
+
+- [Direct Strategy](/api/strategy-direct)
+- [FSM Strategy](/api/strategy-fsm)
+- [Agent](/api/agent)
+- [Directives](/api/directive)

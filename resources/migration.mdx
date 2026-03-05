@@ -1,0 +1,418 @@
+---
+title: Migration Guide
+description: Migrate your application from Jido 1.x to 2.0
+icon: 'arrow-right-arrow-left'
+---
+
+This guide helps you migrate existing Jido applications from version 1.x to version 2.0. The migration can be done incrementally—start with the minimum changes to get running, then adopt new patterns as needed.
+
+## Breaking Changes Summary
+
+| Area | V1 | V2 | Migration Effort |
+|------|----|----|------------------|
+| Runtime | Global singleton | Instance-scoped supervisor | Small |
+| Agent Lifecycle | `AgentServer.start/1` | `Jido.start_agent/3` | Small-Medium |
+| Side Effects | Mixed in callbacks | Directive-based | Medium |
+| Messaging | `Jido.Instruction` | CloudEvents Signals | Medium-Large |
+| Orchestration | Runners (Simple/Chain) | Strategies + Plans | Medium |
+| Actions | `Jido.Actions.*` | `Jido.Tools.*` | Small |
+| Validation | NimbleOptions | Zoi schemas | Small-Medium |
+| Errors | Ad hoc tuples | Splode structured errors | Small-Medium |
+
+## Migration Path Overview
+
+Choose your migration depth based on your timeline and needs:
+
+<Steps>
+  <Step title="Minimal (1-2 hours)">
+    Add supervision tree, update agent starts
+  </Step>
+  <Step title="Intermediate (1 day)">
+    Adopt Plugins, use Directives for side effects
+  </Step>
+  <Step title="Full (1-2 weeks)">
+    Pure `cmd/2`, Zoi schemas, Strategies, Plans
+  </Step>
+</Steps>
+
+## Step 1: Add Jido to Your Supervision Tree
+
+V2 uses instance-scoped supervisors instead of a global singleton. Define an instance module and add it to your supervision tree.
+
+### Create Instance Module
+
+```elixir lib/my_app/jido.ex
+defmodule MyApp.Jido do
+  use Jido, otp_app: :my_app
+end
+```
+
+### Add Configuration
+
+```elixir config/config.exs
+config :my_app, MyApp.Jido,
+  max_tasks: 1000,
+  agent_pools: []
+```
+
+### Update Supervision Tree
+
+```elixir lib/my_app/application.ex
+defmodule MyApp.Application do
+  use Application
+
+  def start(_type, _args) do
+    children = [
+      # Add Jido as a supervised child
+      MyApp.Jido,
+      
+      # Your other children...
+      MyApp.Repo,
+      MyAppWeb.Endpoint
+    ]
+
+    opts = [strategy: :one_for_one, name: MyApp.Supervisor]
+    Supervisor.start_link(children, opts)
+  end
+end
+```
+
+<Note>
+  The instance module provides functions for managing agents throughout your application.
+</Note>
+
+## Step 2: Update Agent Starts
+
+Replace direct `start_link` calls with your instance module's `start_agent/2`.
+
+<CodeGroup>
+```elixir Before (V1)
+# Starting an agent directly
+{:ok, pid} = MyAgent.start_link(id: "agent-1")
+
+# Or via AgentServer
+{:ok, pid} = Jido.AgentServer.start_link(
+  agent: MyAgent,
+  agent_opts: [id: "agent-1"]
+)
+```
+
+```elixir After (V2)
+# Start via your instance module
+{:ok, pid} = MyApp.Jido.start_agent(MyAgent, id: "agent-1")
+
+# With additional options
+{:ok, pid} = MyApp.Jido.start_agent(MyAgent,
+  id: "agent-1",
+  initial_state: %{counter: 0},
+  strategy: Jido.Strategy.Direct
+)
+```
+</CodeGroup>
+
+### Why This Matters
+
+- **Discovery**: Agents are automatically registered and discoverable via `MyApp.Jido.whereis/1`
+- **Lifecycle**: The supervisor handles restarts and cleanup
+- **Hierarchy**: Enables parent-child agent relationships
+
+## Step 3: Update Lifecycle Calls
+
+Replace direct process calls with your instance module's functions.
+
+<CodeGroup>
+```elixir Before (V1)
+# Stopping an agent
+AgentServer.stop(pid)
+GenServer.stop(pid)
+
+# Finding an agent
+pid = Process.whereis(:"agent_agent-1")
+```
+
+```elixir After (V2)
+# Stop via instance module
+MyApp.Jido.stop_agent("agent-1")
+
+# Find via discovery
+pid = MyApp.Jido.whereis("agent-1")
+
+# List all agents
+agents = MyApp.Jido.list_agents()
+```
+</CodeGroup>
+
+## Step 4: Adopt Directives for Side Effects
+
+V2 separates pure state transformations from side effects using Directives. This is the biggest conceptual change.
+
+<CodeGroup>
+```elixir Before (V1): Ad Hoc Side Effects
+defmodule MyAgent do
+  use Jido.Agent
+
+  def handle_result(agent, result) do
+    # Side effect mixed with state logic
+    Phoenix.PubSub.broadcast(MyApp.PubSub, "events", result)
+    
+    # External API call
+    HTTPoison.post!("https://api.example.com/webhook", result)
+    
+    # Update state
+    %{agent | state: Map.put(agent.state, :last_result, result)}
+  end
+end
+```
+
+```elixir After (V2): Declarative Directives
+defmodule MyAgent do
+  use Jido.Agent
+  
+  alias Jido.Agent.Directive
+  alias Jido.Signal
+
+  def cmd(agent, %Signal{type: "result.received"} = signal) do
+    result = signal.data
+    
+    # Pure state update
+    updated_agent = %{agent | 
+      state: Map.put(agent.state, :last_result, result)
+    }
+    
+    # Directives describe effects, don't execute them
+    directives = [
+      Directive.emit(
+        Signal.new!("result.processed", result, source: "/agent"),
+        {:pubsub, topic: "events"}
+      ),
+      Directive.emit(
+        Signal.new!("webhook.send", result, source: "/agent"),
+        {:http, url: "https://api.example.com/webhook"}
+      )
+    ]
+    
+    {updated_agent, directives}
+  end
+end
+```
+</CodeGroup>
+
+### Core Directives
+
+| Directive | Purpose | Example |
+|-----------|---------|---------||
+| `Emit` | Dispatch a signal via adapters | `Directive.emit(signal, {:pubsub, topic: "events"})` |
+| `Spawn` | Spawn a generic BEAM process | `Directive.spawn(Task, :async, [fn -> work() end])` |
+| `SpawnAgent` | Spawn a child agent with hierarchy | `Directive.spawn_agent(ChildAgent, id: "child-1")` |
+| `StopChild` | Stop a tracked child agent | `Directive.stop_child("child-1")` |
+| `Schedule` | Schedule a delayed message | `Directive.schedule(signal, delay: 5_000)` |
+| `Stop` | Stop the agent process | `Directive.stop(:normal)` |
+| `Error` | Signal an error | `Directive.error(:validation_failed)` |
+
+## Step 5: Use CloudEvents Signals
+
+V2 uses CloudEvents-compliant signals instead of ad hoc messages.
+
+<CodeGroup>
+```elixir Before (V1): Ad Hoc Messages
+# Sending messages
+send(pid, {:task_complete, %{id: 123, result: "done"}})
+GenServer.cast(pid, {:process, data})
+
+# Handling in agent
+def handle_info({:task_complete, payload}, state) do
+  # process...
+  {:noreply, state}
+end
+```
+
+```elixir After (V2): Structured Signals
+alias Jido.Signal
+
+# Creating signals
+signal = Signal.new!(
+  "task.completed",
+  %{id: 123, result: "done"},
+  source: "/workers/processor-1"
+)
+
+# Dispatching to a specific agent (synchronous)
+{:ok, agent} = Jido.AgentServer.call(pid, signal)
+
+# Or asynchronously
+:ok = Jido.AgentServer.cast(pid, signal)
+
+# Handling in agent (via cmd/2)
+def cmd(agent, %Signal{type: "task.completed"} = signal) do
+  result = signal.data.result
+  {update_state(agent, result), []}
+end
+```
+</CodeGroup>
+
+### Signal Anatomy
+
+```elixir
+%Jido.Signal{
+  type: "order.placed",           # Event type (required)
+  source: "/checkout/web",        # Origin (required)
+  id: "550e8400-...",             # Unique ID (auto-generated)
+  data: %{order_id: 123},         # Payload
+  subject: "user/456",            # Optional subject
+  time: ~U[2024-01-15 10:30:00Z]  # Timestamp
+}
+```
+
+## Step 6: Migrate Actions to Tools
+
+The `Jido.Actions.*` namespace has been renamed to `Jido.Tools.*`.
+
+<CodeGroup>
+```elixir Before (V1)
+defmodule MyApp.Actions.SendEmail do
+  use Jido.Action,
+    name: "send_email",
+    description: "Sends an email",
+    schema: [
+      to: [type: :string, required: true],
+      subject: [type: :string, required: true]
+    ]
+
+  @impl true
+  def run(params, _context) do
+    # send email...
+    {:ok, %{sent: true}}
+  end
+end
+```
+
+```elixir After (V2)
+defmodule MyApp.Tools.SendEmail do
+  use Jido.Tool,
+    name: "send_email",
+    description: "Sends an email"
+
+  @schema Zoi.struct(__MODULE__, %{
+    to: Zoi.string(description: "Recipient email"),
+    subject: Zoi.string(description: "Email subject")
+  })
+
+  @impl true
+  def run(params, _context) do
+    {:ok, %{sent: true}}
+  end
+end
+```
+</CodeGroup>
+
+## Step 7: Adopt Zoi Schemas
+
+V2 uses Zoi for schema definitions instead of NimbleOptions.
+
+<CodeGroup>
+```elixir Before (V1): NimbleOptions
+defmodule MyAgent do
+  use Jido.Agent,
+    name: "my_agent",
+    schema: [
+      name: [type: :string, required: true],
+      count: [type: :integer, default: 0],
+      tags: [type: {:list, :string}, default: []]
+    ]
+end
+```
+
+```elixir After (V2): Zoi Schemas
+defmodule MyAgent do
+  use Jido.Agent,
+    name: "my_agent"
+
+  @schema Zoi.struct(__MODULE__, %{
+    name: Zoi.string(description: "Agent name"),
+    count: Zoi.integer(default: 0),
+    tags: Zoi.list(Zoi.string()) |> Zoi.default([])
+  }, coerce: true)
+
+  @type t :: unquote(Zoi.type_spec(@schema))
+  @enforce_keys Zoi.Struct.enforce_keys(@schema)
+  defstruct Zoi.Struct.struct_fields(@schema)
+end
+```
+</CodeGroup>
+
+### Zoi Benefits
+
+<CardGroup cols={2}>
+  <Card title="Single Source of Truth" icon="database">
+    Types, defaults, and validation in one place
+  </Card>
+  <Card title="Automatic Typespecs" icon="code">
+    Generate typespecs from schemas
+  </Card>
+  <Card title="Coercion Support" icon="wand-magic-sparkles">
+    Automatic type coercion when needed
+  </Card>
+  <Card title="Better Errors" icon="triangle-exclamation">
+    Clear, actionable error messages
+  </Card>
+</CardGroup>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Agent not found errors">
+    Ensure you're using the correct Jido instance name:
+
+    ```elixir
+    # Wrong
+    Jido.start_agent(Jido, MyAgent, id: "test")
+
+    # Right
+    Jido.start_agent(MyApp.Jido, MyAgent, id: "test")
+    ```
+  </Accordion>
+
+  <Accordion title="Directives not executing">
+    Directives are only executed when returned from `cmd/2`. Ensure you're returning them:
+
+    ```elixir
+    # Wrong - directive is created but not returned
+    def cmd(agent, signal) do
+      Directive.emit(signal, :default)
+      {agent, []}
+    end
+
+    # Right
+    def cmd(agent, signal) do
+      {agent, [Directive.emit(signal, :default)]}
+    end
+    ```
+  </Accordion>
+
+  <Accordion title="Schema validation errors">
+    If migrating from NimbleOptions, fields are required by default in Zoi:
+
+    ```elixir
+    # Zoi doesn't have `required: true`
+    # Use Zoi.optional() for optional fields
+    @schema Zoi.struct(__MODULE__, %{
+      name: Zoi.string(),                         # Required
+      description: Zoi.string() |> Zoi.optional() # Optional
+    })
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Getting Help
+
+<CardGroup cols={3}>
+  <Card title="Documentation" icon="book" href="https://hexdocs.pm/jido">
+    Browse the API docs
+  </Card>
+  <Card title="GitHub Issues" icon="github" href="https://github.com/agentjido/jido/issues">
+    Report bugs or request features
+  </Card>
+  <Card title="Changelog" icon="clock-rotate-left" href="https://github.com/agentjido/jido/blob/main/CHANGELOG.md">
+    View detailed release notes
+  </Card>
+</CardGroup>

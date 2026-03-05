@@ -1,0 +1,284 @@
+---
+title: "Directive"
+description: "Pure effect descriptors for Jido agents"
+---
+
+## Overview
+
+A **directive** is a pure description of an external effect for the runtime (e.g. `Jido.AgentServer`) to execute. Agents and strategies **never** interpret or execute directives; they only emit them.
+
+## Design Philosophy
+
+Directives are bare structs - no tuple wrappers. This enables:
+- Clean pattern matching on struct type
+- Protocol-based dispatch for extensibility
+- External packages can define custom directives
+
+## Core Directives
+
+Jido provides the following built-in directives:
+
+- **[Emit](/api/directive-emit)** - Dispatch a signal via `Jido.Signal.Dispatch`
+- **[SpawnAgent](/api/directive-spawn)** - Spawn a child Jido agent with full hierarchy tracking
+- **Spawn** - Spawn a generic BEAM child process (fire-and-forget, no tracking)
+- **[StopChild](/api/directive-stop)** - Request a tracked child agent to stop gracefully
+- **Stop** - Stop the agent process (self)
+- **[Schedule](/api/directive-schedule)** - Schedule a delayed message
+- **Cron** - Schedule recurring cron jobs
+- **CronCancel** - Cancel a recurring cron job
+- **RunInstruction** - Execute an instruction at runtime and route result to `cmd/2`
+- **Error** - Signal an error (wraps `Jido.Error.t()`)
+
+## Usage
+
+Directives are returned from agent `cmd/2` callbacks:
+
+```elixir
+alias Jido.Agent.Directive
+
+def cmd(agent, action, ctx) do
+  # Pure business logic
+  new_state = update_state(agent.state, action)
+  agent = %{agent | state: new_state}
+  
+  # Emit directives for runtime to execute
+  directives = [
+    Directive.emit(my_signal),
+    Directive.schedule(5000, :timeout)
+  ]
+  
+  {agent, directives}
+end
+```
+
+## Helper Functions
+
+The `Jido.Agent.Directive` module provides convenient constructor functions:
+
+### emit/2
+
+Creates an Emit directive.
+
+```elixir
+Directive.emit(signal)
+Directive.emit(signal, {:pubsub, topic: "events"})
+```
+
+<ParamField path="signal" type="Jido.Signal.t()" required>
+  The signal to dispatch
+</ParamField>
+
+<ParamField path="dispatch" type="term()">
+  Dispatch configuration (adapter and options). If omitted, uses agent's default dispatch.
+</ParamField>
+
+### spawn/2
+
+Creates a Spawn directive for generic BEAM processes.
+
+```elixir
+Directive.spawn({MyWorker, arg: value})
+Directive.spawn(child_spec, :worker_1)
+```
+
+<ParamField path="child_spec" type="term()" required>
+  Supervisor child_spec for the process to spawn
+</ParamField>
+
+<ParamField path="tag" type="term()">
+  Optional correlation tag for logging
+</ParamField>
+
+### spawn_agent/3
+
+Creates a SpawnAgent directive for spawning child agents with hierarchy tracking.
+
+```elixir
+Directive.spawn_agent(MyWorkerAgent, :worker_1)
+Directive.spawn_agent(MyWorkerAgent, :processor, opts: %{initial_state: %{batch_size: 100}})
+Directive.spawn_agent(MyWorkerAgent, :handler, meta: %{assigned_topic: "events"})
+```
+
+<ParamField path="agent" type="module() | struct()" required>
+  Agent module (atom) or pre-built agent struct to spawn
+</ParamField>
+
+<ParamField path="tag" type="term()" required>
+  Tag for tracking this child (used as key in children map)
+</ParamField>
+
+<ParamField path="options" type="keyword()">
+  Additional options:
+  - `:opts` - Options for child AgentServer (map)
+  - `:meta` - Metadata to pass to child via parent reference (map)
+</ParamField>
+
+### stop_child/2
+
+Creates a StopChild directive to gracefully stop a tracked child agent.
+
+```elixir
+Directive.stop_child(:worker_1)
+Directive.stop_child(:processor, :shutdown)
+```
+
+<ParamField path="tag" type="term()" required>
+  Tag of the child to stop
+</ParamField>
+
+<ParamField path="reason" type="term()">
+  Reason for stopping (default: `:normal`)
+</ParamField>
+
+### schedule/2
+
+Creates a Schedule directive.
+
+```elixir
+Directive.schedule(5000, :timeout)
+Directive.schedule(1000, {:check, ref})
+```
+
+<ParamField path="delay_ms" type="non_neg_integer()" required>
+  Delay in milliseconds (must be >= 0)
+</ParamField>
+
+<ParamField path="message" type="term()" required>
+  Message to send after delay
+</ParamField>
+
+### stop/1
+
+Creates a Stop directive to stop the agent process.
+
+```elixir
+Directive.stop()
+Directive.stop(:shutdown)
+```
+
+<ParamField path="reason" type="term()">
+  Reason for stopping (default: `:normal`)
+</ParamField>
+
+### cron/3
+
+Creates a Cron directive for recurring scheduled execution.
+
+```elixir
+Directive.cron("* * * * *", tick_signal)
+Directive.cron("@daily", cleanup_signal, job_id: :daily_cleanup)
+Directive.cron("0 9 * * MON", weekly_signal, job_id: :monday_9am, timezone: "America/New_York")
+```
+
+<ParamField path="cron_expr" type="String.t()" required>
+  Cron expression (e.g., "* * * * *", "@daily", "*/5 * * * *")
+</ParamField>
+
+<ParamField path="message" type="term()" required>
+  Message or signal to send on each tick
+</ParamField>
+
+<ParamField path="opts" type="keyword()">
+  Options:
+  - `:job_id` - Logical id for the job (for upsert/cancel)
+  - `:timezone` - Timezone identifier
+</ParamField>
+
+### cron_cancel/1
+
+Creates a CronCancel directive to stop a recurring job.
+
+```elixir
+Directive.cron_cancel(:heartbeat)
+Directive.cron_cancel(:daily_cleanup)
+```
+
+<ParamField path="job_id" type="term()" required>
+  The logical job id to cancel
+</ParamField>
+
+## Multi-Agent Communication
+
+### emit_to_pid/3
+
+Creates an Emit directive targeting a specific process by PID.
+
+```elixir
+Directive.emit_to_pid(signal, some_pid)
+Directive.emit_to_pid(signal, worker_pid, delivery_mode: :sync)
+```
+
+<ParamField path="signal" type="Jido.Signal.t()" required>
+  The signal to send
+</ParamField>
+
+<ParamField path="pid" type="pid()" required>
+  Target process PID
+</ParamField>
+
+<ParamField path="extra_opts" type="keyword()">
+  Options:
+  - `:delivery_mode` - `:async` (default) or `:sync`
+  - `:timeout` - Timeout for sync delivery (default: 5000)
+</ParamField>
+
+### emit_to_parent/3
+
+Creates an Emit directive targeting the agent's parent.
+
+```elixir
+defmodule WorkDoneAction do
+  use Jido.Action, name: "work.done", schema: []
+
+  def run(_params, context) do
+    reply = Signal.new!("worker.result", %{answer: 42}, source: "/worker")
+    directive = Directive.emit_to_parent(context.agent, reply)
+    {:ok, %{}, List.wrap(directive)}
+  end
+end
+```
+
+<ParamField path="agent" type="struct()" required>
+  The agent struct (must have `__parent__` field in state)
+</ParamField>
+
+<ParamField path="signal" type="Jido.Signal.t()" required>
+  The signal to send
+</ParamField>
+
+<ParamField path="extra_opts" type="keyword()">
+  Same options as `emit_to_pid/3`
+</ParamField>
+
+<Note>
+  Returns `nil` if the agent has no parent. Use `List.wrap/1` to safely handle the result when building directive lists.
+</Note>
+
+## Extensibility
+
+External packages can define their own directive structs:
+
+```elixir
+defmodule MyApp.Directive.CallLLM do
+  defstruct [:model, :prompt, :tag]
+end
+```
+
+The runtime dispatches on struct type, so no changes to core are needed.
+
+## Types
+
+```elixir
+@type t :: struct()
+@type core ::
+        Emit.t()
+        | Error.t()
+        | Spawn.t()
+        | SpawnAgent.t()
+        | StopChild.t()
+        | Schedule.t()
+        | RunInstruction.t()
+        | Stop.t()
+        | Cron.t()
+        | CronCancel.t()
+```

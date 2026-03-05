@@ -1,0 +1,320 @@
+---
+title: "Jido.Await"
+description: "Synchronous helpers for waiting on agent completion"
+---
+
+# Jido.Await
+
+Synchronous helpers for waiting on Jido agents from non-agent code. This module provides utilities for HTTP controllers, CLI tools, and tests that need to synchronously wait for agents to complete.
+
+## Completion Convention
+
+Agents signal completion by setting a terminal status in their state:
+
+```elixir
+agent = put_in(agent.state.status, :completed)
+agent = put_in(agent.state.last_answer, result)
+```
+
+The `completion/3` function uses event-driven waiting via `AgentServer.await_completion/2`, blocking until the agent reaches a terminal state without polling.
+
+## Single Agent Completion
+
+### `completion/3`
+
+Wait for an agent to reach a terminal status.
+
+<ParamField path="server" type="pid() | String.t()" required>
+  Agent server reference (pid or registered ID)
+</ParamField>
+
+<ParamField path="timeout_ms" type="non_neg_integer()">
+  Timeout in milliseconds. Default from config
+</ParamField>
+
+<ParamField path="opts" type="keyword()">
+  Additional options for completion detection
+</ParamField>
+
+<ResponseField name="return" type="{:ok, completion()} | {:error, term()}">
+  Completion result or error
+</ResponseField>
+
+Uses event-driven waiting via GenServer.call - the caller blocks until the agent's state transitions to `:completed` or `:failed`, then receives the result immediately. No polling is involved.
+
+**Options:**
+
+- `:status_path` - Path to status field (default: `[:status]`)
+- `:result_path` - Path to result field (default: `[:last_answer]`)
+- `:error_path` - Path to error field (default: `[:error]`)
+
+**Returns:**
+
+- `{:ok, %{status: :completed, result: any()}}` - Agent completed successfully
+- `{:ok, %{status: :failed, result: any()}}` - Agent failed
+- `{:error, :timeout}` - Timeout reached before completion
+- `{:error, :not_found}` - Agent process not found
+
+**Example:**
+
+```elixir
+{:ok, pid} = Jido.start_agent(jido, MyAgent)
+AgentServer.cast(pid, some_signal)
+{:ok, %{status: :completed, result: answer}} = Jido.Await.completion(pid, 10_000)
+
+# With custom paths for strategy state
+{:ok, result} = Jido.Await.completion(pid, 10_000,
+  status_path: [:__strategy__, :status],
+  result_path: [:__strategy__, :result]
+)
+```
+
+## Child Agent Completion
+
+### `child/4`
+
+Wait for a specific child of a parent agent to complete.
+
+<ParamField path="parent_server" type="pid() | String.t()" required>
+  Parent agent server reference
+</ParamField>
+
+<ParamField path="child_tag" type="term()" required>
+  Child tag to look up
+</ParamField>
+
+<ParamField path="timeout_ms" type="non_neg_integer()">
+  Timeout in milliseconds. Default from config
+</ParamField>
+
+<ParamField path="opts" type="keyword()">
+  Additional options (same as `completion/3`)
+</ParamField>
+
+<ResponseField name="return" type="{:ok, completion()} | {:error, term()}">
+  Completion result or error
+</ResponseField>
+
+First looks up the child by tag in the parent's `children` map, then polls the child for completion.
+
+**Returns:**
+
+- `{:ok, %{status: atom(), result: any()}}` - Child completed
+- `{:error, :timeout}` - Timeout reached
+- `{:error, term()}` - Other error
+
+**Example:**
+
+```elixir
+{:ok, coordinator} = Jido.start_agent(jido, CoordinatorAgent)
+AgentServer.cast(coordinator, %Signal{type: "spawn_worker"})
+{:ok, result} = Jido.Await.child(coordinator, :worker_1, 30_000)
+```
+
+## Multi-Agent Coordination
+
+### `all/3`
+
+Wait for all agents to reach terminal status.
+
+<ParamField path="servers" type="[pid() | String.t()]" required>
+  List of agent server references
+</ParamField>
+
+<ParamField path="timeout_ms" type="non_neg_integer()">
+  Timeout in milliseconds. Default from config
+</ParamField>
+
+<ParamField path="opts" type="keyword()">
+  Additional options (same as `completion/3`)
+</ParamField>
+
+<ResponseField name="return" type="{:ok, map()} | {:error, term()}">
+  Map of server to completion result, or error
+</ResponseField>
+
+Spawns concurrent waiters for each agent and collects results. Returns when all complete or on first infrastructure error.
+
+**Returns:**
+
+- `{:ok, %{server => completion()}}` - All agents completed (includes `:failed` status)
+- `{:error, :timeout}` - Timeout reached before all completed
+- `{:error, {server, reason}}` - Infrastructure error for specific server
+
+**Example:**
+
+```elixir
+{:ok, results} = Jido.Await.all([pid1, pid2, pid3], 30_000)
+# => %{pid1 => %{status: :completed, result: ...}, ...}
+```
+
+### `any/3`
+
+Wait for any agent to reach terminal status.
+
+<ParamField path="servers" type="[pid() | String.t()]" required>
+  List of agent server references
+</ParamField>
+
+<ParamField path="timeout_ms" type="non_neg_integer()">
+  Timeout in milliseconds. Default from config
+</ParamField>
+
+<ParamField path="opts" type="keyword()">
+  Additional options (same as `completion/3`)
+</ParamField>
+
+<ResponseField name="return" type="{:ok, {server(), completion()}} | {:error, term()}">
+  First server to complete and its result, or error
+</ResponseField>
+
+Returns as soon as the first agent completes.
+
+**Returns:**
+
+- `{:ok, {server, completion()}}` - First agent to complete
+- `{:error, :timeout}` - Timeout reached before any completed
+- `{:error, {server, reason}}` - Infrastructure error
+
+**Example:**
+
+```elixir
+{:ok, {winner, result}} = Jido.Await.any([pid1, pid2], 10_000)
+```
+
+## Utility Functions
+
+### `get_children/1`
+
+Get the PIDs of all children of a parent agent.
+
+<ParamField path="parent_server" type="pid() | String.t()" required>
+  Parent agent server reference
+</ParamField>
+
+<ResponseField name="return" type="{:ok, %{term() => pid()}} | {:error, term()}">
+  Map of child tags to PIDs or error
+</ResponseField>
+
+**Example:**
+
+```elixir
+{:ok, children} = Jido.Await.get_children(coordinator)
+# => {:ok, %{worker_1: #PID<0.123.0>, worker_2: #PID<0.124.0>}}
+```
+
+### `get_child/2`
+
+Get a specific child's PID by tag.
+
+<ParamField path="parent_server" type="pid() | String.t()" required>
+  Parent agent server reference
+</ParamField>
+
+<ParamField path="child_tag" type="term()" required>
+  Child tag to look up
+</ParamField>
+
+<ResponseField name="return" type="{:ok, pid()} | {:error, :child_not_found | term()}">
+  Child PID or error
+</ResponseField>
+
+**Returns:**
+
+- `{:ok, pid}` - Child found
+- `{:error, :child_not_found}` - Child with given tag not found
+- `{:error, term()}` - Error getting parent state
+
+**Example:**
+
+```elixir
+{:ok, worker_pid} = Jido.Await.get_child(coordinator, :worker_1)
+```
+
+### `alive?/1`
+
+Check if an agent process is alive and responding.
+
+<ParamField path="server" type="pid() | String.t()" required>
+  Agent server reference
+</ParamField>
+
+<ResponseField name="return" type="boolean()">
+  True if alive and responding, false otherwise
+</ResponseField>
+
+**Example:**
+
+```elixir
+if Jido.Await.alive?(agent_pid) do
+  # safe to interact
+end
+```
+
+### `cancel/2`
+
+Request graceful cancellation of an agent.
+
+<ParamField path="server" type="pid() | String.t()" required>
+  Agent server reference
+</ParamField>
+
+<ParamField path="opts" type="keyword()">
+  Options including `:reason` (default: `:client_cancelled`)
+</ParamField>
+
+<ResponseField name="return" type=":ok | {:error, term()}">
+  Confirmation or error
+</ResponseField>
+
+Sends a cancel signal to the agent. The agent decides how to respond (e.g., set `state.status = :failed` with `state.error = :cancelled`).
+
+This is advisory - callers should use `completion/3` to wait for the agent to actually reach a terminal state.
+
+**Options:**
+
+- `:reason` - Cancellation reason (default: `:client_cancelled`)
+
+**Example:**
+
+```elixir
+:ok = Jido.Await.cancel(agent_pid)
+{:ok, %{status: :failed}} = Jido.Await.completion(agent_pid, 5_000)
+
+# With custom reason
+:ok = Jido.Await.cancel(agent_pid, reason: :user_requested)
+```
+
+## Complete Example
+
+```elixir
+# Start agents
+{:ok, pid1} = Jido.start_agent(jido, WorkerAgent)
+{:ok, pid2} = Jido.start_agent(jido, WorkerAgent)
+{:ok, pid3} = Jido.start_agent(jido, WorkerAgent)
+
+# Send work to all
+AgentServer.cast(pid1, work_signal)
+AgentServer.cast(pid2, work_signal)
+AgentServer.cast(pid3, work_signal)
+
+# Wait for all to complete
+case Jido.Await.all([pid1, pid2, pid3], 30_000) do
+  {:ok, results} ->
+    IO.inspect(results)
+    # %{pid1 => %{status: :completed, result: ...}, ...}
+
+  {:error, :timeout} ->
+    IO.puts("Some agents didn't complete in time")
+end
+
+# Or wait for first to complete
+case Jido.Await.any([pid1, pid2, pid3], 10_000) do
+  {:ok, {winner_pid, result}} ->
+    IO.puts("Winner: #{inspect(winner_pid)}")
+    IO.inspect(result)
+
+  {:error, :timeout} ->
+    IO.puts("No agent completed in time")
+end
+```

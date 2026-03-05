@@ -1,0 +1,285 @@
+---
+title: "Installation"
+description: "Add Jido to your Elixir application"
+---
+
+Jido requires Elixir 1.18+ and Erlang/OTP 26+.
+
+## Using Igniter (Recommended)
+
+The fastest way to get started is with [Igniter](https://hex.pm/packages/igniter), which automatically configures everything:
+
+```bash
+mix igniter.install jido
+```
+
+This will:
+1. Add `jido` to your dependencies in `mix.exs`
+2. Create an instance module at `lib/my_app/jido.ex`
+3. Add configuration to `config/config.exs`
+4. Add the instance module to your supervision tree in `application.ex`
+
+### Generate an Example Agent
+
+To also create an example agent:
+
+```bash
+mix igniter.install jido --example
+```
+
+This creates a working counter agent to help you get started.
+
+<Note>
+Igniter automatically handles all the boilerplate. Skip to [Next Steps](#next-steps) if you used Igniter.
+</Note>
+
+## Manual Installation
+
+If you prefer manual installation or need more control:
+
+<Steps>
+  <Step title="Add Dependency">
+    Add `jido` to your list of dependencies in `mix.exs`:
+
+    ```elixir mix.exs
+    def deps do
+      [
+        {:jido, "~> 2.0"}
+      ]
+    end
+    ```
+
+    Then install dependencies:
+
+    ```bash
+    mix deps.get
+    ```
+  </Step>
+
+  <Step title="Create Instance Module">
+    Create a Jido instance module in your application:
+
+    ```elixir lib/my_app/jido.ex
+    defmodule MyApp.Jido do
+      use Jido, otp_app: :my_app
+    end
+    ```
+
+    This module acts as your application's Jido supervisor and provides convenience functions for managing agents.
+  </Step>
+
+  <Step title="Add Configuration">
+    Create configuration in `config/config.exs`:
+
+    ```elixir config/config.exs
+    config :my_app, MyApp.Jido,
+      max_tasks: 1000,
+      agent_pools: []
+    ```
+
+    <Accordion title="Configuration Options">
+      | Option | Type | Default | Description |
+      |--------|------|---------|-------------|
+      | `max_tasks` | integer | 1000 | Maximum concurrent tasks |
+      | `agent_pools` | list | `[]` | Pre-warmed agent pools for throughput |
+
+      See [Worker Pools](/operations/worker-pools) for pool configuration.
+    </Accordion>
+  </Step>
+
+  <Step title="Add to Supervision Tree">
+    Add your Jido instance to your application's supervision tree in `lib/my_app/application.ex`:
+
+    ```elixir lib/my_app/application.ex
+    defmodule MyApp.Application do
+      use Application
+
+      @impl true
+      def start(_type, _args) do
+        children = [
+          # ... other children
+          MyApp.Jido
+        ]
+
+        opts = [strategy: :one_for_one, name: MyApp.Supervisor]
+        Supervisor.start_link(children, opts)
+      end
+    end
+    ```
+  </Step>
+</Steps>
+
+## Verify Installation
+
+Verify everything is working:
+
+```elixir
+# In IEx
+iex -S mix
+
+# Check that your Jido instance is running
+iex> Process.whereis(MyApp.Jido)
+#PID<0.123.0>
+
+# Create a simple agent
+iex> defmodule TestAgent do
+...>   use Jido.Agent,
+...>     name: "test",
+...>     schema: [count: [type: :integer, default: 0]]
+...> end
+
+# Test pure usage
+iex> agent = TestAgent.new()
+iex> agent.state.count
+0
+
+# Test with runtime
+iex> {:ok, pid} = MyApp.Jido.start_agent(TestAgent, id: "test-1")
+iex> MyApp.Jido.list_agents()
+[{"test-1", #PID<0.456.0>}]
+iex> MyApp.Jido.stop_agent("test-1")
+:ok
+```
+
+## Installation Methods Comparison
+
+<CodeGroup>
+```bash Igniter (Recommended)
+# One command does everything
+mix igniter.install jido
+
+# With example agent
+mix igniter.install jido --example
+```
+
+```elixir Manual Installation
+# 1. Add to mix.exs
+{:jido, "~> 2.0"}
+
+# 2. Create instance module
+defmodule MyApp.Jido do
+  use Jido, otp_app: :my_app
+end
+
+# 3. Add config
+config :my_app, MyApp.Jido,
+  max_tasks: 1000,
+  agent_pools: []
+
+# 4. Add to supervision tree
+children = [MyApp.Jido]
+```
+</CodeGroup>
+
+## Multiple Instances
+
+Jido supports multiple isolated instances in one application:
+
+```elixir lib/my_app/jido_primary.ex
+defmodule MyApp.JidoPrimary do
+  use Jido, otp_app: :my_app
+end
+```
+
+```elixir lib/my_app/jido_background.ex
+defmodule MyApp.JidoBackground do
+  use Jido, otp_app: :my_app
+end
+```
+
+```elixir config/config.exs
+config :my_app, MyApp.JidoPrimary,
+  max_tasks: 1000,
+  agent_pools: []
+
+config :my_app, MyApp.JidoBackground,
+  max_tasks: 500,
+  agent_pools: []
+```
+
+```elixir lib/my_app/application.ex
+children = [
+  MyApp.JidoPrimary,
+  MyApp.JidoBackground
+]
+```
+
+Each instance has:
+- Isolated supervision tree
+- Separate agent registry
+- Independent configuration
+- Own task supervisor
+
+## Default Instance for Scripts
+
+For quick scripts and Livebook, use the default instance:
+
+```elixir
+# No configuration needed
+{:ok, _pid} = Jido.start()
+
+# Use Jido.default_instance() for agent operations
+{:ok, pid} = Jido.start_agent(
+  Jido.default_instance(),
+  MyAgent,
+  id: "script-agent"
+)
+```
+
+<Warning>
+The default instance (`Jido.Default`) is meant for scripts and prototyping. Production applications should use explicit instance modules.
+</Warning>
+
+## Runtime Requirements
+
+| Requirement | Version |
+|-------------|----------|
+| Elixir | 1.18+ |
+| Erlang/OTP | 26+ |
+
+Jido uses modern Elixir features and is tested on OTP 27+.
+
+## Dependencies
+
+Jido depends on:
+
+- **jido_action** (~> 2.0) - Action definitions with schema validation
+- **jido_signal** (~> 2.0) - CloudEvents-compliant messaging
+- **ok** (~> 2.3) - Tagged tuple helpers
+- **nimble_options** (~> 1.1) - Schema validation
+- **telemetry** (~> 1.3) - Observability events
+- **phoenix_pubsub** (~> 2.1) - Pub/sub messaging
+
+See [mix.exs](https://github.com/agentjido/jido/blob/main/mix.exs) for the complete dependency list.
+
+## Optional: Igniter for Code Generation
+
+Igniter is an optional dependency used only for installation:
+
+```elixir mix.exs
+def deps do
+  [
+    {:jido, "~> 2.0"},
+    {:igniter, "~> 0.7", optional: true}
+  ]
+end
+```
+
+Igniter is not required at runtime.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Build your first agent in 5 minutes
+  </Card>
+  <Card title="Core Concepts" icon="lightbulb" href="/core-concepts">
+    Understand the cmd/2 pattern and agent architecture
+  </Card>
+  <Card title="Configuration" icon="gear" href="/guides/configuration">
+    Advanced configuration options
+  </Card>
+  <Card title="Worker Pools" icon="layer-group" href="/operations/worker-pools">
+    Pre-warmed agent pools for high throughput
+  </Card>
+</CardGroup>

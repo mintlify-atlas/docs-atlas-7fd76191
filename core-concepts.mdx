@@ -1,0 +1,463 @@
+---
+title: "Core Concepts"
+description: "The mental model behind Jido agents"
+---
+
+Jido follows a pure functional architecture inspired by Elm and Redux. This guide explains the core patterns and concepts.
+
+## The cmd/2 Pattern
+
+The fundamental operation in Jido:
+
+```elixir
+{agent, directives} = MyAgent.cmd(agent, action)
+```
+
+### Key Invariants
+
+<CardGroup cols={2}>
+  <Card title="Agent is Complete" icon="check">
+    The returned agent is **fully updated**. No "apply directives" step needed.
+  </Card>
+  <Card title="Directives are External" icon="arrow-right">
+    Directives describe **external effects only**. They never modify agent state.
+  </Card>
+  <Card title="Pure Function" icon="flask">
+    Same inputs always produce **same outputs**. Deterministic and testable.
+  </Card>
+  <Card title="No Side Effects" icon="ban">
+    `cmd/2` is pure. Side effects are described in directives for the runtime.
+  </Card>
+</CardGroup>
+
+### The Flow
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        Signal arrives                           │
+└─────────────────────────────────────────────────────────────────┘
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  AgentServer (GenServer)                                        │
+│  ─────────────────────────                                      │
+│  • Routes signal to action                                      │
+│  • Calls Agent.cmd/2                                            │
+│  • Executes returned directives                                 │
+└─────────────────────────────────────────────────────────────────┘
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  Agent.cmd/2 (pure function)                                    │
+│  ───────────────────────────                                    │
+│  Input:  agent struct + action                                  │
+│  Output: {updated_agent, directives}                            │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Agent vs AgentServer
+
+<AccordionGroup>
+  <Accordion title="Agent - Pure Data Structure">
+    **What it is:** Immutable struct with state and behavior
+
+    **Responsibilities:**
+    - Defines schema and state validation
+    - Implements `cmd/2` for pure transformations
+    - No process, no mailbox, no side effects
+
+    **Example:**
+    ```elixir
+    defmodule MyAgent do
+      use Jido.Agent,
+        name: "my_agent",
+        schema: [count: [type: :integer, default: 0]]
+    end
+
+    agent = MyAgent.new()
+    {agent, directives} = MyAgent.cmd(agent, IncrementAction)
+    ```
+
+    <Tip>
+      Test agents directly with `cmd/2` - no need to start processes.
+    </Tip>
+  </Accordion>
+
+  <Accordion title="AgentServer - OTP Runtime">
+    **What it is:** GenServer process that runs an agent
+
+    **Responsibilities:**
+    - Holds agent state in a process
+    - Routes incoming signals to actions
+    - Executes directives (emit signals, spawn children, etc.)
+    - Manages agent lifecycle
+
+    **Example:**
+    ```elixir
+    {:ok, pid} = MyApp.Jido.start_agent(MyAgent, id: "agent-1")
+    signal = Jido.Signal.new!("increment", %{}, source: "/user")
+    {:ok, agent} = Jido.AgentServer.call(pid, signal)
+    ```
+
+    <Note>
+      AgentServer wraps your pure agent in OTP for production use.
+    </Note>
+  </Accordion>
+</AccordionGroup>
+
+| Concept | What It Is | Responsibility |
+|---------|------------|----------------|
+| **Agent** | Immutable struct + module | Defines schema, handles `cmd/2`, pure logic |
+| **AgentServer** | GenServer process | Holds agent state, executes directives, routes signals |
+
+## Actions, Directives, and State Operations
+
+### Actions
+
+Actions **transform state** and may perform side effects:
+
+```elixir
+defmodule FetchDataAction do
+  use Jido.Action,
+    name: "fetch_data",
+    schema: [url: [type: :string, required: true]]
+
+  def run(params, context) do
+    # Actions can perform side effects
+    case HTTPoison.get(params.url) do
+      {:ok, response} ->
+        # Return new state
+        {:ok, %{data: response.body, fetched_at: DateTime.utc_now()}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+end
+```
+
+- Executed by `cmd/2`
+- Update `agent.state` directly
+- Can call APIs, read files, query databases
+- Return `{:ok, new_state}` or `{:error, reason}`
+
+### Directives
+
+Directives **describe external effects** for the runtime:
+
+```elixir
+defmodule NotifyAction do
+  use Jido.Action
+
+  def run(params, context) do
+    # Describe effects as directives
+    directives = [
+      %Jido.Agent.Directive.Emit{
+        signal: Jido.Signal.new!("user.notified", params, source: "/agent")
+      }
+    ]
+
+    {:ok, %{notified: true}, directives}
+  end
+end
+```
+
+- Bare structs emitted by agents
+- Runtime (AgentServer) interprets them
+- **Never modify agent state**
+- Examples: Emit signals, spawn processes, schedule messages
+
+### Built-in Directives
+
+| Directive | Purpose |
+|-----------|----------|
+| `Emit` | Dispatch a signal via configured adapters |
+| `Error` | Signal an error from `cmd/2` |
+| `Spawn` | Spawn a generic BEAM child process |
+| `SpawnAgent` | Spawn a child Jido agent with hierarchy tracking |
+| `StopChild` | Gracefully stop a tracked child agent |
+| `Schedule` | Schedule a delayed message |
+| `Stop` | Stop the agent process |
+
+### State Operations
+
+State operations are **internal state transitions** handled by the strategy layer:
+
+```elixir
+# These are used internally by strategies
+Jido.Agent.StateOp.SetState        # Deep merge into state
+Jido.Agent.StateOp.ReplaceState    # Replace state wholesale
+Jido.Agent.StateOp.DeleteKeys      # Remove top-level keys
+Jido.Agent.StateOp.SetPath         # Set value at nested path
+Jido.Agent.StateOp.DeletePath      # Delete value at nested path
+```
+
+<Warning>
+StateOps are internal to the strategy layer and never reach the runtime. Most users won't interact with them directly.
+</Warning>
+
+### Comparison Table
+
+| | Actions | Directives | State Operations |
+|---|---------|------------|------------------|
+| **Purpose** | Transform state, may perform side effects | Describe external effects | Internal state changes |
+| **Executed by** | `cmd/2`, update `agent.state` | Runtime (AgentServer) interprets | Strategy layer during `cmd/2` |
+| **Examples** | Call API, query DB, validate data | Emit signal, spawn process, schedule message | Set nested key, merge state, replace state |
+| **Side effects?** | Yes, can perform I/O | No, just descriptions | No, pure transformations |
+| **Reach runtime?** | No, only their results do | Yes, explicitly | No, consumed by strategy |
+
+## Signals
+
+Signals are CloudEvents-compliant messages sent to agents:
+
+```elixir
+signal = Jido.Signal.new!(
+  "counter.increment",  # type
+  %{amount: 5},         # data
+  source: "/user/123"   # source
+)
+
+# Send to AgentServer
+{:ok, agent} = Jido.AgentServer.call(pid, signal)
+```
+
+### Signal Routing
+
+Agents declare signal routes at compile time:
+
+```elixir
+defmodule MyAgent do
+  use Jido.Agent,
+    name: "my_agent",
+    signal_routes: [
+      {"counter.increment", IncrementAction},
+      {"counter.decrement", DecrementAction},
+      {"payment.*", ProcessPaymentAction}
+    ]
+end
+```
+
+When a signal arrives:
+1. AgentServer receives the signal
+2. Routes it to an action using signal type
+3. Executes action via `cmd/2`
+4. Returns updated agent and processes directives
+
+<Note>
+Signals must match a route or the agent will return an error. This ensures explicit handling of all message types.
+</Note>
+
+## Instance-Scoped Architecture
+
+Jido uses **explicit instances** - no global singletons:
+
+```elixir
+defmodule MyApp.Jido do
+  use Jido, otp_app: :my_app
+end
+```
+
+### Benefits
+
+<CardGroup cols={2}>
+  <Card title="Isolated Supervision" icon="sitemap">
+    Each instance has its own supervision tree
+  </Card>
+  <Card title="Multiple Instances" icon="layer-group">
+    Run multiple isolated Jido instances per app
+  </Card>
+  <Card title="Clear Ownership" icon="id-badge">
+    Explicit ownership boundaries
+  </Card>
+  <Card title="Easier Testing" icon="vial">
+    Test with isolated instances
+  </Card>
+</CardGroup>
+
+### Example: Multiple Instances
+
+```elixir
+# Primary workload
+defmodule MyApp.JidoPrimary do
+  use Jido, otp_app: :my_app
+end
+
+# Background processing
+defmodule MyApp.JidoBackground do
+  use Jido, otp_app: :my_app
+end
+
+children = [
+  MyApp.JidoPrimary,
+  MyApp.JidoBackground
+]
+```
+
+## Why This Architecture?
+
+<AccordionGroup>
+  <Accordion title="Testability">
+    Test `cmd/2` directly without processes:
+
+    ```elixir
+    test "increments counter" do
+      agent = MyAgent.new()
+      {agent, directives} = MyAgent.cmd(agent, IncrementAction)
+
+      assert agent.state.count == 1
+      assert directives == []
+    end
+    ```
+
+    No need for `start_supervised!`, async false, or process cleanup.
+  </Accordion>
+
+  <Accordion title="Predictability">
+    No hidden state mutations. The agent you get back is complete:
+
+    ```elixir
+    {agent, directives} = MyAgent.cmd(agent, SomeAction)
+    # agent.state is fully updated
+    # directives are just descriptions
+    ```
+
+    The state is never "partially updated" waiting for directives.
+  </Accordion>
+
+  <Accordion title="Composability">
+    Directives are data - inspect, transform, filter, or mock them:
+
+    ```elixir
+    {agent, directives} = MyAgent.cmd(agent, NotifyAction)
+
+    # Test directives as data
+    assert [%Directive.Emit{signal: signal}] = directives
+    assert signal.type == "user.notified"
+    ```
+  </Accordion>
+
+  <Accordion title="Separation of Concerns">
+    Pure logic (Agent) vs. effectful runtime (AgentServer):
+
+    - **Agent:** Pure functions, no processes, easy to test
+    - **AgentServer:** OTP runtime, executes effects, production-ready
+  </Accordion>
+</AccordionGroup>
+
+## Complete Example
+
+<CodeGroup>
+```elixir Agent Definition
+defmodule PaymentAgent do
+  use Jido.Agent,
+    name: "payment",
+    schema: [
+      status: [type: :atom, default: :pending],
+      amount: [type: :integer, required: true],
+      processed_at: [type: :string]
+    ],
+    signal_routes: [
+      {"payment.process", ProcessPaymentAction},
+      {"payment.cancel", CancelPaymentAction}
+    ]
+end
+```
+
+```elixir Action
+defmodule ProcessPaymentAction do
+  use Jido.Action
+
+  def run(_params, context) do
+    # Perform side effect
+    case PaymentGateway.charge(context.state.amount) do
+      {:ok, transaction_id} ->
+        # Return updated state + directives
+        new_state = %{
+          status: :completed,
+          transaction_id: transaction_id,
+          processed_at: DateTime.utc_now() |> DateTime.to_iso8601()
+        }
+
+        directives = [
+          %Jido.Agent.Directive.Emit{
+            signal: Jido.Signal.new!(
+              "payment.completed",
+              %{transaction_id: transaction_id},
+              source: "/payment-agent"
+            )
+          }
+        ]
+
+        {:ok, new_state, directives}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+end
+```
+
+```elixir Pure Usage
+# Test without processes
+agent = PaymentAgent.new(amount: 1000)
+{agent, directives} = PaymentAgent.cmd(agent, ProcessPaymentAction)
+
+assert agent.state.status == :completed
+assert [%Directive.Emit{signal: signal}] = directives
+assert signal.type == "payment.completed"
+```
+
+```elixir Runtime Usage
+# Production with AgentServer
+{:ok, pid} = MyApp.Jido.start_agent(
+  PaymentAgent,
+  id: "payment-123",
+  state: %{amount: 1000}
+)
+
+signal = Jido.Signal.new!(
+  "payment.process",
+  %{},
+  source: "/checkout"
+)
+
+{:ok, agent} = Jido.AgentServer.call(pid, signal)
+# AgentServer executed the action AND processed directives
+```
+</CodeGroup>
+
+## Key Terms Reference
+
+| Term | Definition |
+|------|------------|
+| **Agent** | Immutable struct with state and schema. Defines `cmd/2` for pure transformations. |
+| **AgentServer** | GenServer process that runs an agent and executes directives. |
+| **Action** | Function that transforms agent state (may perform side effects). |
+| **Directive** | Effect description for runtime execution (emit, spawn, schedule, etc.). |
+| **Signal** | CloudEvents-compliant message sent to agents. |
+| **Plugin** | Composable capability module bundling actions, state, and routing rules. |
+| **Strategy** | Execution pattern (Direct, FSM, custom) that controls how actions are processed. |
+| **State Operation** | Internal state transition operation applied by strategy layer. |
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Building Agents" icon="robot" href="/guides/agents">
+    Deep dive into agent definitions and state management
+  </Card>
+  <Card title="Actions" icon="bolt" href="/guides/actions">
+    Learn how to write actions that transform state
+  </Card>
+  <Card title="Signals & Routing" icon="route" href="/guides/signals">
+    Signal-based communication and routing
+  </Card>
+  <Card title="Directives" icon="paper-plane" href="/guides/directives">
+    Available effect descriptions and how to use them
+  </Card>
+  <Card title="Runtime" icon="server" href="/guides/runtime">
+    AgentServer and process management
+  </Card>
+  <Card title="Testing" icon="vial" href="/guides/testing">
+    Testing patterns for agents and actions
+  </Card>
+</CardGroup>

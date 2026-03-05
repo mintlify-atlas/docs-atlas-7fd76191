@@ -1,0 +1,141 @@
+---
+title: "StateOps"
+description: "Centralized state operation application for strategies"
+---
+
+## Overview
+
+`Jido.Agent.StateOps` provides centralized state operation application for strategies. It separates state operations (state mutations) from external directives. All strategies should use these helpers to ensure consistent behavior.
+
+## Functions
+
+### apply_result/2
+
+Merges action result into agent state using deep merge semantics.
+
+<ParamField path="agent" type="Agent.t()" required>
+  The agent struct to update.
+</ParamField>
+
+<ParamField path="result" type="map" required>
+  The result map to merge into agent state.
+</ParamField>
+
+<ResponseField name="return" type="Agent.t()">
+  Updated agent with merged state.
+</ResponseField>
+
+```elixir
+result = %{status: :completed, data: "processed"}
+updated_agent = StateOps.apply_result(agent, result)
+```
+
+### apply_state_ops/2
+
+Applies a list of state operations to the agent.
+
+State operations modify agent state. External directives are collected and returned for the runtime to process.
+
+<ParamField path="agent" type="Agent.t()" required>
+  The agent struct to update.
+</ParamField>
+
+<ParamField path="effects" type="list(struct)" required>
+  List of state operations and directives to process.
+</ParamField>
+
+<ResponseField name="return" type="{Agent.t(), list(struct)}">
+  Tuple of updated agent and list of external directives.
+</ResponseField>
+
+```elixir
+alias Jido.Agent.{StateOp, Directive}
+
+effects = [
+  %StateOp.SetState{attrs: %{status: :working}},
+  %StateOp.SetPath{path: [:config, :retry], value: 3},
+  %Directive.Emit{signal: my_signal}
+]
+
+{updated_agent, directives} = StateOps.apply_state_ops(agent, effects)
+# updated_agent has state operations applied
+# directives = [%Directive.Emit{signal: my_signal}]
+```
+
+### deep_put_in/3
+
+Helper to put a value at a nested path, creating intermediate maps if needed.
+
+<ParamField path="map" type="map" required>
+  The map to update.
+</ParamField>
+
+<ParamField path="path" type="list(atom)" required>
+  Path to the key as a list of atoms.
+</ParamField>
+
+<ParamField path="value" type="any" required>
+  Value to set at the path.
+</ParamField>
+
+<ResponseField name="return" type="map">
+  Updated map with value set at path.
+</ResponseField>
+
+```elixir
+map = %{}
+updated = StateOps.deep_put_in(map, [:config, :timeout], 5000)
+# => %{config: %{timeout: 5000}}
+```
+
+## State Operation Processing
+
+The `apply_state_ops/2` function processes effects in order:
+
+1. **StateOp.SetState** - Deep merges attributes into state
+2. **StateOp.ReplaceState** - Replaces entire state map
+3. **StateOp.DeleteKeys** - Removes top-level keys using `Map.drop/2`
+4. **StateOp.SetPath** - Sets value at nested path
+5. **StateOp.DeletePath** - Removes value at nested path using `pop_in/2`
+6. **Any other struct** - Treated as external directive, collected and returned
+
+## Example Usage
+
+```elixir
+defmodule MyStrategy do
+  use Jido.Agent.Strategy
+
+  alias Jido.Agent.StateOps
+  alias Jido.Agent.StateOp
+  alias Jido.Agent.Directive
+
+  def cmd(agent, signal) do
+    # Process signal and generate effects
+    effects = [
+      %StateOp.SetState{attrs: %{last_signal: signal.type}},
+      %StateOp.SetPath{path: [:metrics, :count], value: get_count(agent) + 1},
+      %Directive.Emit{signal: response_signal}
+    ]
+
+    # Apply state operations and collect directives
+    {updated_agent, directives} = StateOps.apply_state_ops(agent, effects)
+
+    {updated_agent, directives}
+  end
+
+  defp get_count(agent), do: get_in(agent.state, [:metrics, :count]) || 0
+end
+```
+
+## Type Definitions
+
+```elixir
+@type t :: StateOp.t()
+
+# Individual operation types
+StateOp.SetState.t()
+StateOp.ReplaceState.t()
+StateOp.DeleteKeys.t()
+StateOp.SetPath.t()
+StateOp.DeletePath.t()
+```

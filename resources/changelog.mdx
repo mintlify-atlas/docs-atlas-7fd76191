@@ -1,0 +1,200 @@
+---
+title: Changelog
+description: Track changes, updates, and improvements to Jido
+icon: 'clock-rotate-left'
+---
+
+<Note>
+  The changelog is automatically generated using [Conventional Commits](https://www.conventionalcommits.org/) and [git_ops](https://hex.pm/packages/git_ops).
+</Note>
+
+## 2.0.0 - 2026-02-22
+
+### Changed
+- Promote `2.0.0-rc.5` to stable `2.0.0`
+- Require Elixir `~> 1.18`
+- Bump ecosystem deps to stable ranges: `jido_action ~> 2.0`, `jido_signal ~> 2.0`
+
+### Fixed
+- Restore compile-time `signal_routes` behavior while preserving callback compatibility
+- Prevent loopback `emit` from redispatching to the current agent in AgentServer
+
+### Tooling
+- Align Igniter setup/docs with the instance-scoped API
+
+## 2.0.0-rc.5 - 2026-02-16
+
+### Added
+- **Observability V2**: Per-instance debug & telemetry configuration
+- **Always-on Events**: `emit_event` helper for lifecycle observability
+- **Event Contracts**: Event contracts and lifecycle observability documentation
+- **Directive Telemetry**: Directive struct included in agent_server telemetry metadata
+- **RunInstruction Directive**: Pure FSM cmd support
+- **Async Signal Prevention**: Prevent synchronous signal-call blocking in AgentServer
+- **Declarative Schedules**: DSL for cron scheduling
+
+### Changed
+- **BREAKING**: Unified persistence on `Jido.Persist` and `Jido.Storage`
+- Centralized defaults and validate observability config
+- Hardened InstanceManager registry and key semantics
+- Shared instruction tracking helpers in strategy layer
+- Used shared templates in Igniter generator tasks
+- Unified entry normalization across storage adapters
+- Extracted shared signal collector test helper
+
+### Fixed
+- Normalized timeout diagnostics in `await_all`/`await_any`
+- Canceled timed-out completion waiters in AgentServer
+- Preserved file read errors during append
+- Returned normalized errors for corrupt entry logs
+- Avoided atom creation from persisted journal kinds
+- Restored agent metadata export for discovery
+- Returned routing error struct for unknown signals
+- Normalized refinement errors for Zoi validation in plugins
+- Made ETS `append_thread` atomic and revision-safe
+- Sent `jido.agent.stop` when stopping child
+- Normalized id in both constructor paths to guarantee UUID7
+- Fixed silent cron tick failure
+- Normalized util and storage-facing error contracts
+- Offloaded runtime dispatch from sensor process
+
+### Dependencies
+- Bumped `jido_action` and `jido_signal` to 2.0.0-rc.5
+
+## 2.0.0-rc.4 - 2026-02-06
+
+### Added
+- **Memory Plugin**: Implemented `Jido.Memory` as default plugin under `__memory__` key
+- **Identity Plugin**: Added `Jido.Identity` as default agent plugin
+- **Plugin Singleton**: Plugin singleton flag in plugin config schema
+- **Plugin Signal Middleware**: Improvements to plugin signal middleware
+
+### Changed
+- Updated `signal_routes` to accept context parameter
+
+### Fixed
+- Wired `on_restore/2` into generated `restore/2` callback
+
+### Tests & Chores
+- Added memory plugin and default plugins persistence examples
+- Organized example tests into subdirectories
+- Added `Jido.Plugin` to doctor ignore_modules for macro-generated defs
+- Removed AI cruft and build artifacts
+
+### Dependencies
+- Bumped `jido_action` and `jido_signal` to 2.0.0-rc.4
+
+## 2.0.0-rc.3 - 2026-02-04
+
+### Added
+- **cmd/3 with Timeout**: Support for per-action timeout opts
+- **Unified Persistence**: Persistence layer for agent checkpoints and thread journals
+- **Telemetry Infrastructure**: Span tracking and metrics
+- **Debug Helpers**: Improved timeout errors and debugging tools
+
+### Changed
+- **BREAKING**: Renamed `Jido.Skill` to `Jido.Plugin`
+
+### Fixed
+- Dialyzer/Credo: Added :mix to PLT, removed unnecessary ignores
+
+### Dependencies
+- Bumped `jido_action` and `jido_signal` to 2.0.0-rc.3
+- Bumped `ex_doc` from 0.40.0 to 0.40.1
+
+## 2.0.0-rc.2 - 2025-01-30
+
+### Changed
+- **Zoi Schema Migration**: Converted remaining structs to use Zoi schemas for consistent validation
+- **Macro Decomposition**: Decomposed large macros and improved code organization
+- **Sensor Simplification**: Simplified `handle_event/2` to directive-only format
+
+### Fixed
+- Addressed code quality issues from codebase review
+- Improved process lifecycle handling and test reliability
+
+### Dependencies
+- Bumped `jido_action` and `jido_signal` to 2.0.0-rc.2
+
+## 2.0.0 Architecture Preview - 2025-12-31
+
+### Added
+- **Instance-Scoped Supervisors**: User-owned, instance-scoped supervisors instead of global singletons
+- **Jido Supervisor Module**: Manages per-instance Registry, TaskSupervisor, and AgentSupervisor
+- **Agent Lifecycle API**: Functions for `start_agent/3`, `stop_agent/2`, `whereis/2`, `list_agents/1`
+- **Test Isolation**: `JidoTest.Case` module for automatic test isolation
+- **Per-Instance Scheduler**: Scoped scheduler support
+- **Multi-Agent Coordination**: `await/3` and `await_child/4` for agent completion
+- **Discovery Delegates**: Discovery functions via main Jido module
+
+### Breaking Changes
+- **Explicit Supervision**: Must add `{Jido, name: MyApp.Jido}` to supervision tree
+- **Agent Start**: Use `Jido.start_agent(instance, agent, opts)` instead of `AgentServer.start/1`
+- **Instance Option**: Pass `jido: MyApp.Jido` when starting agents directly
+
+### Changed
+- Refactored from global singletons to instance-scoped architecture
+- Agents register in instance-specific Registry
+- Per-instance TaskSupervisor and AgentSupervisor
+- Updated all examples to use new 2.0 patterns
+
+## Earlier Releases
+
+### Unreleased - 2025-08-29
+
+**Added:**
+- **Modular API Architecture**: Refactored monolithic `Jido.ex` into specialized modules
+  - `Jido.Agent.Lifecycle` - Agent lifecycle management
+  - `Jido.Agent.Interaction` - Agent communication
+  - `Jido.Agent.Utilities` - Helper functions
+- **Test Helpers**: Comprehensive `JidoTest.Support` module
+- **Table-Driven Tests**: Data-driven delegation tests for maintainable coverage
+- **Performance Optimizations**: ~40% reduction in test execution time
+
+**Changed:**
+- Improved test performance and maintainability
+- Enhanced resource management with automatic cleanup
+- Better test patterns and consistency
+
+**Fixed:**
+- Test suite optimization and resource management
+- Code quality improvements
+
+### Previous - 2025-08-25
+
+**Added:**
+- **Automatic Action Registration**: Skills declare required actions automatically
+- **Module Path Refactoring**: Moved from `Jido.Actions.*` to `Jido.Tools.*`
+- **Default Skills**: Agent server uses default skills
+
+**Breaking Changes:**
+- **Action Paths**: Moved from `Jido.Actions.*` to `Jido.Tools.*`
+- **Runner System**: Deprecated separate Runner modules
+
+**Fixed:**
+- Task update action field handling
+- State manager update semantics
+- Error handling for action registration
+
+### 1.1.0-rc.1 - 2025-02-18
+
+- Addressed open Credo errors
+- Added documentation
+- Cleaned up README for 1.1 release
+
+### 1.1.0-rc - 2025-02-08
+
+- Introduced stateful agents
+
+## Version History
+
+For the complete version history and detailed commit messages, see the [CHANGELOG.md](https://github.com/agentjido/jido/blob/main/CHANGELOG.md) on GitHub.
+
+<CardGroup cols={2}>
+  <Card title="GitHub Releases" icon="github" href="https://github.com/agentjido/jido/releases">
+    View all releases on GitHub
+  </Card>
+  <Card title="Hex Versions" icon="cube" href="https://hex.pm/packages/jido/versions">
+    Browse versions on Hex.pm
+  </Card>
+</CardGroup>

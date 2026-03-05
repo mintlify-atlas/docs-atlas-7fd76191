@@ -1,0 +1,298 @@
+---
+title: "SpawnAgent Directive"
+description: "Spawn child agents with parent-child hierarchy tracking"
+---
+
+## Overview
+
+The **SpawnAgent** directive spawns a child agent with parent-child hierarchy tracking.
+
+Unlike the generic `Spawn` directive, `SpawnAgent` specifically spawns another Jido agent and sets up the logical parent-child relationship:
+
+- Child's parent reference points to the spawning agent
+- Parent monitors the child process
+- Parent tracks child in its children map by tag
+- Child exit signals are delivered to parent as `jido.agent.child.exit`
+
+## Struct Fields
+
+<ParamField path="agent" type="module() | struct()" required>
+  Agent module (atom) or pre-built agent struct to spawn.
+</ParamField>
+
+<ParamField path="tag" type="term()" required>
+  Tag for tracking this child (used as key in children map).
+</ParamField>
+
+<ParamField path="opts" type="map()" default="%{}">
+  Additional options passed to child AgentServer.
+  - `:id` - Custom ID for the child agent
+  - `:initial_state` - Initial state to merge with agent defaults
+  - `:name` - Optional name registration
+</ParamField>
+
+<ParamField path="meta" type="map()" default="%{}">
+  Metadata to pass to child via parent reference. Accessible in child's state via `state.__parent__.meta`.
+</ParamField>
+
+## Usage Examples
+
+### Basic Spawn
+
+```elixir
+alias Jido.Agent.Directive
+
+# Spawn a worker agent
+%Directive.SpawnAgent{
+  agent: MyWorkerAgent,
+  tag: :worker_1
+}
+
+# Using helper function
+Directive.spawn_agent(MyWorkerAgent, :worker_1)
+```
+
+### Spawn with Custom ID and Initial State
+
+```elixir
+%Directive.SpawnAgent{
+  agent: MyWorkerAgent,
+  tag: :processor,
+  opts: %{
+    id: "custom-processor-id",
+    initial_state: %{batch_size: 100, max_retries: 3}
+  }
+}
+
+# Using helper function
+Directive.spawn_agent(
+  MyWorkerAgent,
+  :processor,
+  opts: %{
+    id: "custom-processor-id",
+    initial_state: %{batch_size: 100}
+  }
+)
+```
+
+### Spawn with Metadata
+
+```elixir
+%Directive.SpawnAgent{
+  agent: MyWorkerAgent,
+  tag: :handler,
+  meta: %{assigned_topic: "events.user", priority: :high}
+}
+
+# Using helper function
+Directive.spawn_agent(
+  MyWorkerAgent,
+  :handler,
+  meta: %{assigned_topic: "events.user"}
+)
+```
+
+## Parent-Child Communication
+
+### Child Accessing Parent Metadata
+
+```elixir
+defmodule WorkerAgent do
+  use Jido.Agent, name: "worker"
+  
+  def cmd(agent, :init, _ctx) do
+    # Access parent metadata
+    case agent.state.__parent__ do
+      %{meta: %{assigned_topic: topic}} ->
+        # Use assigned topic
+        IO.puts("Worker assigned to topic: #{topic}")
+      _ ->
+        :ok
+    end
+    
+    {agent, []}
+  end
+end
+```
+
+### Child Emitting to Parent
+
+```elixir
+defmodule WorkerAgent do
+  use Jido.Agent, name: "worker"
+  
+  def cmd(agent, :work_done, _ctx) do
+    result_signal = Signal.new!(
+      "worker.completed",
+      %{status: :success, value: 42},
+      source: "/worker/#{agent.id}"
+    )
+    
+    directives = [
+      Directive.emit_to_parent(agent, result_signal)
+    ]
+    
+    {agent, directives}
+  end
+end
+```
+
+### Parent Receiving Child Exit
+
+```elixir
+defmodule ParentAgent do
+  use Jido.Agent, name: "parent"
+  
+  def cmd(agent, %Signal{type: "jido.agent.child.exit", data: data}, _ctx) do
+    %{tag: tag, pid: pid, reason: reason} = data
+    
+    # Handle child exit
+    IO.puts("Child #{tag} (#{inspect(pid)}) exited: #{inspect(reason)}")
+    
+    # Optionally restart child
+    directives = if reason != :normal do
+      [Directive.spawn_agent(WorkerAgent, tag)]
+    else
+      []
+    end
+    
+    {agent, directives}
+  end
+end
+```
+
+## Complete Parent-Child Example
+
+```elixir
+defmodule ParentAgent do
+  use Jido.Agent, name: "parent"
+  
+  def signal_routes(_ctx) do
+    [
+      {"spawn.worker", :spawn_worker},
+      {"jido.agent.child.exit", :handle_child_exit},
+      {"worker.result", :handle_worker_result}
+    ]
+  end
+  
+  def cmd(agent, :spawn_worker, _ctx) do
+    directives = [
+      Directive.spawn_agent(
+        WorkerAgent,
+        :worker_1,
+        meta: %{batch_size: 100}
+      )
+    ]
+    {agent, directives}
+  end
+  
+  def cmd(agent, :handle_child_exit, ctx) do
+    %{tag: tag, reason: reason} = ctx.signal.data
+    IO.puts("Child #{tag} exited: #{reason}")
+    {agent, []}
+  end
+  
+  def cmd(agent, :handle_worker_result, ctx) do
+    result = ctx.signal.data
+    IO.puts("Received result from worker: #{inspect(result)}")
+    {agent, []}
+  end
+end
+
+defmodule WorkerAgent do
+  use Jido.Agent, name: "worker", schema: [
+    batch_size: [type: :integer, default: 50]
+  ]
+  
+  def signal_routes(_ctx) do
+    [
+      {"process", :process}
+    ]
+  end
+  
+  def cmd(agent, :process, _ctx) do
+    # Access parent metadata
+    batch_size = case agent.state.__parent__ do
+      %{meta: %{batch_size: size}} -> size
+      _ -> agent.state.batch_size
+    end
+    
+    # Do work
+    result = process_batch(batch_size)
+    
+    # Send result to parent
+    result_signal = Signal.new!(
+      "worker.result",
+      %{result: result},
+      source: "/worker/#{agent.id}"
+    )
+    
+    directives = [
+      Directive.emit_to_parent(agent, result_signal)
+    ]
+    
+    {agent, directives}
+  end
+  
+  defp process_batch(size) do
+    # Process work...
+    "Processed #{size} items"
+  end
+end
+```
+
+## Lifecycle Management
+
+See [StopChild Directive](/api/directive-stop) for gracefully stopping child agents.
+
+## Comparison with Spawn
+
+Use `SpawnAgent` when you need:
+- Parent-child hierarchy tracking
+- Process monitoring and exit signals
+- The ability to use `emit_to_parent/3` from the child
+- Lifecycle management via `StopChild`
+
+Use `Spawn` for:
+- Generic BEAM processes (Tasks, GenServers, etc.)
+- Fire-and-forget spawning
+- No parent-child relationship semantics
+
+## Helper Function
+
+```elixir
+@spec spawn_agent(term(), term(), keyword()) :: SpawnAgent.t()
+```
+
+```elixir
+Directive.spawn_agent(agent, tag)
+Directive.spawn_agent(agent, tag, opts: %{...})
+Directive.spawn_agent(agent, tag, meta: %{...})
+Directive.spawn_agent(agent, tag, opts: %{...}, meta: %{...})
+```
+
+## Schema
+
+```elixir
+@schema Zoi.struct(
+  Jido.Agent.Directive.SpawnAgent,
+  %{
+    agent: Zoi.any(description: "Agent module (atom) or pre-built agent struct"),
+    tag: Zoi.any(description: "Tag for tracking this child"),
+    opts: Zoi.map(description: "Options for child AgentServer") |> Zoi.default(%{}),
+    meta: Zoi.map(description: "Metadata to pass to child") |> Zoi.default(%{})
+  },
+  coerce: true
+)
+```
+
+## Type
+
+```elixir
+@type t :: %__MODULE__{
+  agent: term(),
+  tag: term(),
+  opts: map(),
+  meta: map()
+}
+```

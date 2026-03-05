@@ -1,0 +1,162 @@
+---
+title: "Actions.Control"
+description: "Control flow and signal handling actions"
+---
+
+## Overview
+
+Base actions for control flow and signal handling. These actions provide common patterns for cancellation handling, signal forwarding, and no-op acknowledgment.
+
+## Actions
+
+### Cancel
+
+Handle cancellation requests. Sets the agent status to `:failed` with a cancellation error. Standard handler for the `jido.agent.cancel` signal.
+
+<ParamField path="reason" type="any" default=":cancelled">
+  Cancellation reason.
+</ParamField>
+
+```elixir
+use Jido.Agent,
+  name: "my_agent",
+  signal_routes: [
+    {"jido.agent.cancel", Jido.Actions.Control.Cancel}
+  ]
+```
+
+### Noop
+
+No-operation action that acknowledges a signal without changes. Useful for explicitly handling signals that need no action, testing, or placeholder routes.
+
+```elixir
+use Jido.Agent,
+  name: "my_agent",
+  signal_routes: [
+    {"system.ping", Jido.Actions.Control.Noop}
+  ]
+```
+
+### Forward
+
+Forward a signal to another agent. Re-emits the current signal (or a transformed version) to a target process.
+
+<ParamField path="target_pid" type="pid" required>
+  PID to forward signal to.
+</ParamField>
+
+<ParamField path="signal_type" type="string">
+  Optional new signal type (uses original if nil).
+</ParamField>
+
+<ParamField path="payload" type="map">
+  Optional new payload (uses original if nil).
+</ParamField>
+
+<ParamField path="source" type="string">
+  Optional new source (appends "/forwarded" if nil).
+</ParamField>
+
+```elixir
+# Forward to a worker pool
+{Jido.Actions.Control.Forward, %{target_pid: worker_pid}}
+
+# Transform and forward
+{Jido.Actions.Control.Forward, %{
+  target_pid: processor_pid,
+  signal_type: "process.request"
+}}
+```
+
+### Broadcast
+
+Broadcast a signal to multiple targets via PubSub.
+
+<ParamField path="topic" type="string" required>
+  PubSub topic to broadcast to.
+</ParamField>
+
+<ParamField path="signal_type" type="string" required>
+  Signal type to broadcast.
+</ParamField>
+
+<ParamField path="payload" type="map" default="%{}">
+  Signal payload data.
+</ParamField>
+
+<ParamField path="source" type="string" default="/broadcast">
+  Signal source path.
+</ParamField>
+
+```elixir
+{Jido.Actions.Control.Broadcast, %{
+  topic: "workers",
+  signal_type: "work.available",
+  payload: %{task_id: "123"}
+}}
+```
+
+### Reply
+
+Reply to the source of the current signal. Extracts the source PID from the incoming signal and sends a reply. Requires the original signal to have a `reply_to` field in its data.
+
+<ParamField path="signal_type" type="string" required>
+  Reply signal type.
+</ParamField>
+
+<ParamField path="payload" type="map" default="%{}">
+  Reply payload data.
+</ParamField>
+
+```elixir
+use Jido.Agent,
+  name: "query_agent",
+  signal_routes: [{"query.request", MyQueryHandler}]
+
+# In handler, use Reply action
+{Jido.Actions.Control.Reply, %{
+  signal_type: "query.response",
+  payload: %{result: data}
+}}
+```
+
+## Usage Example
+
+```elixir
+defmodule MyAgent do
+  use Jido.Agent,
+    name: "my_agent",
+    signal_routes: [
+      # Cancellation
+      {"jido.agent.cancel", Jido.Actions.Control.Cancel},
+      
+      # Forwarding
+      {"proxy.forward", Jido.Actions.Control.Forward},
+      
+      # Broadcasting
+      {"notify.all", Jido.Actions.Control.Broadcast},
+      
+      # Replying
+      {"request.handle", MyRequestHandler}
+    ]
+end
+
+defmodule MyRequestHandler do
+  use Jido.Action,
+    name: "handle_request",
+    schema: []
+
+  def run(_params, context) do
+    # Process request
+    result = process_request(context.signal)
+    
+    # Reply to sender
+    {:ok, %{}, [
+      Jido.Agent.Directive.emit(
+        Jido.Signal.new!("request.response", %{result: result}),
+        {:pid, context.signal.data.reply_to}
+      )
+    ]}
+  end
+end
+```

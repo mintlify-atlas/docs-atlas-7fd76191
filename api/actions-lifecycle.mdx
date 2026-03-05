@@ -1,0 +1,184 @@
+---
+title: "Actions.Lifecycle"
+description: "Agent lifecycle and coordination actions"
+---
+
+## Overview
+
+Base actions for agent lifecycle and coordination patterns. These actions provide common patterns for parent-child communication, process spawning, and graceful termination.
+
+## Actions
+
+### NotifyParent
+
+Emit a signal back to the spawning parent agent. Requires the agent to have been spawned via `SpawnAgent` directive (which populates `__parent__` in state).
+
+<ParamField path="signal_type" type="string" required>
+  Signal type to emit to parent.
+</ParamField>
+
+<ParamField path="payload" type="map" default="%{}">
+  Signal payload data.
+</ParamField>
+
+<ParamField path="source" type="string" default="/child">
+  Signal source path.
+</ParamField>
+
+```elixir
+# Route child completion to this action
+{"work.complete", Jido.Actions.Lifecycle.NotifyParent}
+
+# Or invoke directly with params
+{Jido.Actions.Lifecycle.NotifyParent, %{
+  signal_type: "child.done",
+  payload: %{result: 42}
+}}
+```
+
+### NotifyPid
+
+Emit a signal to an arbitrary process by PID.
+
+<ParamField path="target_pid" type="pid" required>
+  Target process PID.
+</ParamField>
+
+<ParamField path="signal_type" type="string" required>
+  Signal type to emit.
+</ParamField>
+
+<ParamField path="payload" type="map" default="%{}">
+  Signal payload data.
+</ParamField>
+
+<ParamField path="source" type="string" default="/agent">
+  Signal source path.
+</ParamField>
+
+<ParamField path="delivery_mode" type=":async | :sync" default=":async">
+  Delivery mode.
+</ParamField>
+
+```elixir
+{Jido.Actions.Lifecycle.NotifyPid, %{
+  target_pid: some_pid,
+  signal_type: "result.ready",
+  payload: %{data: result}
+}}
+```
+
+### SpawnChild
+
+Spawn a child agent with hierarchy tracking. The spawned agent will have a parent reference allowing it to use `emit_to_parent/3` to communicate back.
+
+<ParamField path="agent_module" type="atom" required>
+  Agent module to spawn.
+</ParamField>
+
+<ParamField path="tag" type="atom" required>
+  Tag for tracking this child.
+</ParamField>
+
+<ParamField path="initial_state" type="map" default="%{}">
+  Initial state for the child agent.
+</ParamField>
+
+<ParamField path="meta" type="map" default="%{}">
+  Metadata to pass to child.
+</ParamField>
+
+```elixir
+{"coordinator.spawn", Jido.Actions.Lifecycle.SpawnChild}
+
+# With params
+{Jido.Actions.Lifecycle.SpawnChild, %{
+  agent_module: MyWorker,
+  tag: :worker_1,
+  initial_state: %{batch_size: 100}
+}}
+```
+
+### StopSelf
+
+Request graceful termination of the current agent process.
+
+<ParamField path="reason" type="any" default=":normal">
+  Reason for stopping.
+</ParamField>
+
+```elixir
+{"shutdown", Jido.Actions.Lifecycle.StopSelf}
+
+# With custom reason
+{Jido.Actions.Lifecycle.StopSelf, %{reason: :work_complete}}
+```
+
+### StopChild
+
+Request graceful termination of a tracked child agent.
+
+<ParamField path="tag" type="atom" required>
+  Tag of the child to stop.
+</ParamField>
+
+<ParamField path="reason" type="any" default=":normal">
+  Reason for stopping.
+</ParamField>
+
+```elixir
+{"coordinator.stop_worker", Jido.Actions.Lifecycle.StopChild}
+
+{Jido.Actions.Lifecycle.StopChild, %{tag: :worker_1, reason: :shutdown}}
+```
+
+## Usage Example
+
+```elixir
+defmodule CoordinatorAgent do
+  use Jido.Agent,
+    name: "coordinator",
+    signal_routes: [
+      {"work.spawn", SpawnWorkerAction},
+      {"work.done", ProcessResultAction},
+      {"shutdown", Jido.Actions.Lifecycle.StopSelf}
+    ]
+end
+
+defmodule SpawnWorkerAction do
+  use Jido.Action,
+    name: "spawn_worker",
+    schema: [task: [type: :map, required: true]]
+
+  def run(%{task: task}, _context) do
+    {:ok, %{spawning: true}, [
+      Jido.Agent.Directive.spawn_agent(
+        WorkerAgent,
+        :worker,
+        opts: %{initial_state: %{task: task}}
+      )
+    ]}
+  end
+end
+
+defmodule WorkerAgent do
+  use Jido.Agent,
+    name: "worker",
+    signal_routes: [
+      {"work.start", ProcessTaskAction},
+      {"work.complete", NotifyParentAction}
+    ]
+end
+
+defmodule NotifyParentAction do
+  use Jido.Action,
+    name: "notify_parent",
+    schema: [result: [type: :any, required: true]]
+
+  def run(%{result: result}, context) do
+    signal = Jido.Signal.new!("work.done", %{result: result})
+    directive = Jido.Agent.Directive.emit_to_parent(context.agent, signal)
+    {:ok, %{}, [directive]}
+  end
+end
+```

@@ -1,0 +1,284 @@
+---
+title: "StopChild Directive"
+description: "Request a tracked child agent to stop gracefully"
+---
+
+## Overview
+
+The **StopChild** directive requests that a tracked child agent stop gracefully.
+
+This directive provides symmetric lifecycle control for child agents spawned via `SpawnAgent`. It sends a shutdown signal to the child, allowing it to terminate cleanly.
+
+The child is identified by its `tag` (the key used in `SpawnAgent`). If the child is not found, the directive is a no-op.
+
+## Struct Fields
+
+<ParamField path="tag" type="term()" required>
+  Tag of the child to stop (must match a key in the children map).
+</ParamField>
+
+<ParamField path="reason" type="term()" default=":normal">
+  Reason for stopping. Common values:
+  - `:normal` - Normal shutdown (default)
+  - `:shutdown` - Requested shutdown
+  - Custom atoms for application-specific reasons
+</ParamField>
+
+## Usage Examples
+
+### Basic Stop
+
+```elixir
+alias Jido.Agent.Directive
+
+# Stop a worker by tag
+%Directive.StopChild{tag: :worker_1}
+
+# Using helper function
+Directive.stop_child(:worker_1)
+```
+
+### Stop with Specific Reason
+
+```elixir
+%Directive.StopChild{
+  tag: :processor,
+  reason: :shutdown
+}
+
+# Using helper function
+Directive.stop_child(:processor, :shutdown)
+```
+
+### Stop Multiple Children
+
+```elixir
+def cmd(agent, :stop_all_workers, _ctx) do
+  worker_tags = [:worker_1, :worker_2, :worker_3]
+  
+  directives = Enum.map(worker_tags, fn tag ->
+    Directive.stop_child(tag)
+  end)
+  
+  {agent, directives}
+end
+```
+
+## Behavior
+
+The runtime sends a `jido.agent.stop` signal to the child process, which triggers a graceful shutdown. The child's exit will be delivered back to the parent as a `jido.agent.child.exit` signal.
+
+### Child Exit Signal
+
+When a child exits (either from `StopChild` or naturally), the parent receives:
+
+```elixir
+%Signal{
+  type: "jido.agent.child.exit",
+  data: %{
+    tag: :worker_1,
+    pid: #PID<0.123.0>,
+    reason: :normal
+  },
+  source: "/agent/parent-id"
+}
+```
+
+## Complete Lifecycle Example
+
+```elixir
+defmodule ParentAgent do
+  use Jido.Agent, name: "parent"
+  
+  def signal_routes(_ctx) do
+    [
+      {"spawn.worker", :spawn_worker},
+      {"stop.worker", :stop_worker},
+      {"jido.agent.child.exit", :handle_child_exit}
+    ]
+  end
+  
+  def cmd(agent, :spawn_worker, _ctx) do
+    directives = [
+      Directive.spawn_agent(WorkerAgent, :worker_1)
+    ]
+    {agent, directives}
+  end
+  
+  def cmd(agent, :stop_worker, _ctx) do
+    directives = [
+      Directive.stop_child(:worker_1, :shutdown)
+    ]
+    {agent, directives}
+  end
+  
+  def cmd(agent, :handle_child_exit, ctx) do
+    %{tag: tag, pid: pid, reason: reason} = ctx.signal.data
+    
+    IO.puts("""
+    Child exited:
+      Tag: #{tag}
+      PID: #{inspect(pid)}
+      Reason: #{inspect(reason)}
+    """)
+    
+    {agent, []}
+  end
+end
+```
+
+## Graceful Shutdown Pattern
+
+```elixir
+defmodule WorkerAgent do
+  use Jido.Agent, name: "worker", schema: [
+    active_tasks: [type: {:list, :any}, default: []]
+  ]
+  
+  def signal_routes(_ctx) do
+    [
+      {"jido.agent.stop", :handle_stop},
+      {"process", :process}
+    ]
+  end
+  
+  def cmd(agent, :handle_stop, _ctx) do
+    # Check if we have active tasks
+    case agent.state.active_tasks do
+      [] ->
+        # No active tasks, can stop immediately
+        {agent, [Directive.stop(:normal)]}
+      
+      tasks ->
+        # Have active tasks, finish them first
+        IO.puts("Finishing #{length(tasks)} tasks before stopping...")
+        
+        # Set flag to prevent new tasks
+        new_state = Map.put(agent.state, :stopping, true)
+        agent = %{agent | state: new_state}
+        
+        # Schedule a check after current tasks complete
+        {agent, [Directive.schedule(1000, :check_stop)]}
+    end
+  end
+  
+  def cmd(agent, :check_stop, _ctx) do
+    case agent.state.active_tasks do
+      [] ->
+        {agent, [Directive.stop(:normal)]}
+      _ ->
+        {agent, [Directive.schedule(1000, :check_stop)]}
+    end
+  end
+  
+  def cmd(agent, :process, _ctx) do
+    # Don't accept new tasks if stopping
+    if Map.get(agent.state, :stopping) do
+      {agent, []}
+    else
+      # Normal processing
+      {agent, []}
+    end
+  end
+end
+```
+
+## Restart Pattern
+
+```elixir
+defmodule ParentAgent do
+  use Jido.Agent, name: "parent"
+  
+  def cmd(agent, :handle_child_exit, ctx) do
+    %{tag: tag, reason: reason} = ctx.signal.data
+    
+    directives = case reason do
+      :normal ->
+        # Normal exit, don't restart
+        []
+      
+      :shutdown ->
+        # Requested shutdown, don't restart
+        []
+      
+      _error ->
+        # Unexpected error, restart child
+        IO.puts("Restarting child #{tag} after error: #{inspect(reason)}")
+        [Directive.spawn_agent(WorkerAgent, tag)]
+    end
+    
+    {agent, directives}
+  end
+end
+```
+
+## Stopping with Cleanup
+
+```elixir
+defmodule WorkerAgent do
+  use Jido.Agent, name: "worker"
+  
+  def cmd(agent, :handle_stop, _ctx) do
+    # Perform cleanup before stopping
+    cleanup(agent.state)
+    
+    # Emit cleanup complete signal to parent
+    signal = Signal.new!(
+      "worker.cleanup.complete",
+      %{id: agent.id},
+      source: "/worker/#{agent.id}"
+    )
+    
+    directives = [
+      Directive.emit_to_parent(agent, signal),
+      Directive.stop(:normal)
+    ]
+    
+    {agent, directives}
+  end
+  
+  defp cleanup(state) do
+    # Close connections, save state, etc.
+    IO.puts("Cleaning up worker resources...")
+  end
+end
+```
+
+## Helper Function
+
+```elixir
+@spec stop_child(term(), term()) :: StopChild.t()
+```
+
+```elixir
+Directive.stop_child(:worker_1)
+Directive.stop_child(:processor, :shutdown)
+Directive.stop_child(:handler, :timeout)
+```
+
+## Schema
+
+```elixir
+@schema Zoi.struct(
+  Jido.Agent.Directive.StopChild,
+  %{
+    tag: Zoi.any(description: "Tag of the child to stop"),
+    reason: Zoi.any(description: "Reason for stopping") |> Zoi.default(:normal)
+  },
+  coerce: true
+)
+```
+
+## Type
+
+```elixir
+@type t :: %__MODULE__{
+  tag: term(),
+  reason: term()
+}
+```
+
+## Related
+
+- [SpawnAgent Directive](/api/directive-spawn) - Spawn child agents
+- [Emit Directive](/api/directive-emit) - Communicate with child agents

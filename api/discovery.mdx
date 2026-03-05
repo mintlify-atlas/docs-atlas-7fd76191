@@ -1,0 +1,275 @@
+---
+title: "Discovery"
+description: "Fast, persistent catalog of Jido components"
+---
+
+## Overview
+
+Fast, persistent catalog of Jido components (Actions, Sensors, Agents, Plugins, Demos). Discovery uses `:persistent_term` for optimal read performance. The catalog is built asynchronously during application startup and can be refreshed on demand.
+
+## Component Discovery
+
+Discovery automatically finds and indexes:
+
+- **Actions** - Discrete units of work (`__action_metadata__/0`)
+- **Sensors** - Event monitoring components (`__sensor_metadata__/0`)
+- **Agents** - Autonomous workers (`__agent_metadata__/0`)
+- **Plugins** - Reusable capability packs (`__plugin_metadata__/0`)
+- **Demos** - Example implementations (`__jido_demo__/0`)
+
+## Component Metadata
+
+Each discovered component includes:
+
+```elixir
+%{
+  module: MyApp.CoolAction,
+  name: "cool_action",
+  description: "Does cool stuff",
+  slug: "abc123de",
+  category: :utility,
+  tags: [:cool, :stuff]
+}
+```
+
+## Functions
+
+### init_async/0
+
+Initializes the discovery catalog asynchronously. Call this from your application supervisor's start callback.
+
+```elixir
+Jido.Discovery.init_async()
+```
+
+### refresh/0
+
+Refreshes the component catalog by rescanning all loaded applications.
+
+```elixir
+Jido.Discovery.refresh()
+```
+
+### last_updated/0
+
+Returns the last time the catalog was updated.
+
+```elixir
+{:ok, timestamp} = Jido.Discovery.last_updated()
+```
+
+### catalog/0
+
+Returns the full catalog for inspection.
+
+```elixir
+{:ok, catalog} = Jido.Discovery.catalog()
+```
+
+## Listing Components
+
+### list_actions/1
+
+Lists all Actions with optional filtering and pagination.
+
+```elixir
+Jido.Discovery.list_actions(category: :utility, limit: 10)
+Jido.Discovery.list_actions(tag: :ai, offset: 10, limit: 10)
+Jido.Discovery.list_actions(name: "send")
+```
+
+### list_sensors/1
+
+Lists all Sensors with optional filtering and pagination.
+
+```elixir
+Jido.Discovery.list_sensors(category: :monitoring)
+Jido.Discovery.list_sensors(tag: :metrics)
+```
+
+### list_agents/1
+
+Lists all Agents with optional filtering and pagination.
+
+```elixir
+Jido.Discovery.list_agents()
+Jido.Discovery.list_agents(tag: :worker)
+```
+
+### list_plugins/1
+
+Lists all Plugins with optional filtering and pagination.
+
+```elixir
+Jido.Discovery.list_plugins(category: :integration)
+Jido.Discovery.list_plugins(tag: :http)
+```
+
+### list_demos/1
+
+Lists all Demos with optional filtering and pagination.
+
+```elixir
+Jido.Discovery.list_demos()
+Jido.Discovery.list_demos(tag: :tutorial)
+```
+
+## Finding by Slug
+
+### get_action_by_slug/1
+
+Retrieves an Action by its slug.
+
+```elixir
+action = Jido.Discovery.get_action_by_slug("abc123de")
+```
+
+### get_sensor_by_slug/1
+
+Retrieves a Sensor by its slug.
+
+```elixir
+sensor = Jido.Discovery.get_sensor_by_slug("xyz789ab")
+```
+
+### get_agent_by_slug/1
+
+Retrieves an Agent by its slug.
+
+```elixir
+agent = Jido.Discovery.get_agent_by_slug("def456gh")
+```
+
+### get_plugin_by_slug/1
+
+Retrieves a Plugin by its slug.
+
+```elixir
+plugin = Jido.Discovery.get_plugin_by_slug("hij789kl")
+```
+
+### get_demo_by_slug/1
+
+Retrieves a Demo by its slug.
+
+```elixir
+demo = Jido.Discovery.get_demo_by_slug("mno012pq")
+```
+
+## Filtering Options
+
+<ParamField path="limit" type="integer">
+  Maximum results to return.
+</ParamField>
+
+<ParamField path="offset" type="integer">
+  Results to skip (pagination).
+</ParamField>
+
+<ParamField path="name" type="string">
+  Filter by name (partial match).
+</ParamField>
+
+<ParamField path="description" type="string">
+  Filter by description (partial match).
+</ParamField>
+
+<ParamField path="category" type="atom">
+  Filter by category (exact match).
+</ParamField>
+
+<ParamField path="tag" type="atom">
+  Filter by tag (must have exact tag).
+</ParamField>
+
+Filters use AND logic - all specified filters must match.
+
+## Usage Example
+
+```elixir
+defmodule MyApp.Application do
+  use Application
+
+  def start(_type, _args) do
+    # Initialize discovery asynchronously
+    _task = Jido.Discovery.init_async()
+
+    children = [
+      # Your supervision tree
+    ]
+
+    opts = [strategy: :one_for_one, name: MyApp.Supervisor]
+    Supervisor.start_link(children, opts)
+  end
+end
+
+# List AI-related actions
+ai_actions = Jido.Discovery.list_actions(tag: :ai, limit: 20)
+
+# Find a specific plugin
+case Jido.Discovery.get_plugin_by_slug("abc123") do
+  nil -> IO.puts("Plugin not found")
+  plugin -> IO.inspect(plugin, label: "Found plugin")
+end
+
+# Pagination
+page_1 = Jido.Discovery.list_actions(limit: 10, offset: 0)
+page_2 = Jido.Discovery.list_actions(limit: 10, offset: 10)
+```
+
+## Implementing Discovery Metadata
+
+### For Actions
+
+```elixir
+defmodule MyApp.CoolAction do
+  use Jido.Action,
+    name: "cool_action",
+    description: "Does cool stuff",
+    category: :utility,
+    tags: [:cool, :stuff],
+    schema: []
+
+  def run(_params, _context) do
+    {:ok, %{result: "cool"}}
+  end
+end
+```
+
+### For Plugins
+
+```elixir
+defmodule MyApp.MyPlugin do
+  use Jido.Plugin,
+    name: "my_plugin",
+    description: "Provides X capability",
+    category: :integration,
+    tags: [:http, :api],
+    state_key: :my_plugin,
+    actions: [MyApp.PluginAction]
+end
+```
+
+### For Sensors
+
+```elixir
+defmodule MyApp.MySensor do
+  use Jido.Sensor,
+    name: "my_sensor",
+    description: "Monitors X metric"
+
+  @impl true
+  def init(config, _context) do
+    {:ok, %{}}
+  end
+
+  @impl true
+  def handle_event(event, state) do
+    {:ok, state}
+  end
+end
+```
+
+## Performance
+
+Reads are extremely fast (direct memory access) and never block. All processes can read concurrently without contention. The catalog is built once during startup and refreshed only when explicitly requested.

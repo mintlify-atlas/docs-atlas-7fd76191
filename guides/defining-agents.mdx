@@ -1,0 +1,323 @@
+---
+title: Defining Agents
+description: Learn how to define agents with schemas, hooks, and the cmd/2 contract in Jido
+---
+
+Agents are immutable data structures that hold state and respond to actions. The core operation is `cmd/2` (or `cmd/3` with options), which processes actions and returns an updated agent plus directives for external effects.
+
+## The Agent Contract
+
+The fundamental operation:
+
+```elixir
+{agent, directives} = MyAgent.cmd(agent, action)
+{agent, directives} = MyAgent.cmd(agent, action, opts)
+```
+
+**Key invariants:**
+
+- The returned `agent` is always complete—no "apply directives" step needed
+- `directives` describe external effects only—they never modify agent state
+- `cmd/2` and `cmd/3` are pure functions—given same inputs, always same outputs
+
+## Defining an Agent
+
+<Steps>
+
+### Create your agent module
+
+```elixir
+defmodule MyAgent do
+  use Jido.Agent,
+    name: "my_agent",                        # Required - alphanumeric + underscores
+    description: "My custom agent",          # Optional
+    category: "example",                     # Optional
+    tags: ["demo"],                          # Default: []
+    vsn: "1.0.0",                            # Optional
+    schema: [                                # State schema (see below)
+      status: [type: :atom, default: :idle],
+      counter: [type: :integer, default: 0]
+    ],
+    strategy: Jido.Agent.Strategy.Direct,    # Default
+    plugins: [MyPlugin],                     # Default: []
+    default_plugins: true,                   # Load built-in plugins (Default: true)
+    schedules: [                             # Declarative cron schedules (Default: [])
+      {"*/5 * * * *", "heartbeat.tick", job_id: :heartbeat}
+    ]
+end
+```
+
+### Define your state schema
+
+Agents support two schema formats:
+
+**NimbleOptions (legacy, familiar):**
+
+```elixir
+use Jido.Agent,
+  name: "my_agent",
+  schema: [
+    status: [type: :atom, default: :idle],
+    counter: [type: :integer, default: 0],
+    config: [type: {:map, :atom, :string}, default: %{}]
+  ]
+```
+
+**Zoi (recommended for new code):**
+
+```elixir
+use Jido.Agent,
+  name: "my_agent",
+  schema: Zoi.object(%{
+    status: Zoi.atom() |> Zoi.default(:idle),
+    counter: Zoi.integer() |> Zoi.default(0),
+    config: Zoi.map() |> Zoi.default(%{})
+  })
+```
+
+### Create agent instances
+
+```elixir
+# Create with defaults
+agent = MyAgent.new()
+
+# Create with custom ID
+agent = MyAgent.new(id: "custom-id")
+
+# Create with initial state
+agent = MyAgent.new(state: %{counter: 10})
+```
+
+</Steps>
+
+## Action Formats
+
+`cmd/2` accepts actions in multiple formats:
+
+```elixir
+# Action module with no params
+{agent, directives} = MyAgent.cmd(agent, MyAction)
+
+# Action with params
+{agent, directives} = MyAgent.cmd(agent, {MyAction, %{value: 42}})
+
+# Action with params and context
+{agent, directives} = MyAgent.cmd(agent, {MyAction, %{value: 42}, %{user_id: 123}})
+
+# Action with params, context, and per-instruction opts
+{agent, directives} = MyAgent.cmd(agent, {MyAction, %{value: 42}, %{}, [timeout: 5000]})
+
+# Full instruction struct
+{agent, directives} = MyAgent.cmd(agent, %Instruction{action: MyAction, params: %{}})
+
+# List of actions (processed in sequence)
+{agent, directives} = MyAgent.cmd(agent, [Action1, {Action2, %{x: 1}}])
+```
+
+## Execution Options via cmd/3
+
+Pass options that apply to all actions in the command:
+
+```elixir
+# With timeout (5 second limit per action)
+{agent, directives} = MyAgent.cmd(agent, MyAction, timeout: 5000)
+
+# With timeout and no retries
+{agent, directives} = MyAgent.cmd(agent, MyAction, timeout: 1000, max_retries: 0)
+
+# Options applied to all actions in a list
+{agent, directives} = MyAgent.cmd(agent, [Action1, Action2], timeout: 5000)
+```
+
+**Supported options:**
+
+- `:timeout` — Maximum time (in ms) for each action to complete
+- `:max_retries` — Maximum retry attempts on failure
+- `:backoff` — Initial backoff time in ms (doubles with each retry)
+
+## State Management
+
+### Updating State
+
+Deep-merge attributes into agent state:
+
+```elixir
+{:ok, agent} = MyAgent.set(agent, %{status: :running})
+{:ok, agent} = MyAgent.set(agent, counter: 5)
+```
+
+### Validating State
+
+```elixir
+# Validate state, keeping extra fields
+{:ok, agent} = MyAgent.validate(agent)
+
+# Strict mode: only schema-defined fields are kept
+{:ok, agent} = MyAgent.validate(agent, strict: true)
+```
+
+## Lifecycle Hooks
+
+Optional callbacks for pure transformations before/after command processing.
+
+### on_before_cmd/2
+
+Called before action processing. Transform agent or action:
+
+```elixir
+def on_before_cmd(agent, action) do
+  # Example: log the action being processed
+  {:ok, agent} = set(agent, %{last_action: inspect(action)})
+  {:ok, agent, action}
+end
+```
+
+**Use cases:**
+
+- Mirror action params into agent state
+- Add default params based on current state
+- Enforce invariants before execution
+
+### on_after_cmd/3
+
+Called after action processing. Transform agent or directives:
+
+```elixir
+def on_after_cmd(agent, action, directives) do
+  # Example: auto-validate after every command
+  {:ok, agent} = validate(agent)
+  {:ok, agent, directives}
+end
+```
+
+**Use cases:**
+
+- Auto-validate state after changes
+- Derive computed fields
+- Add invariant checks
+
+## Working Example
+
+Here's a complete example showing agent definition and usage:
+
+```elixir
+defmodule CounterAgent do
+  use Jido.Agent,
+    name: "counter_agent",
+    description: "A simple counter agent",
+    schema: [
+      counter: [type: :integer, default: 0],
+      status: [type: :atom, default: :idle]
+    ]
+
+  # Optional: custom hook to validate counter never goes negative
+  def on_after_cmd(agent, _action, directives) do
+    if agent.state.counter < 0 do
+      {:ok, %{agent | state: %{agent.state | counter: 0}}, directives}
+    else
+      {:ok, agent, directives}
+    end
+  end
+end
+
+defmodule IncrementAction do
+  use Jido.Action,
+    name: "increment",
+    schema: [amount: [type: :integer, default: 1]]
+
+  def run(params, context) do
+    current = Map.get(context.state, :counter, 0)
+    {:ok, %{counter: current + params.amount}}
+  end
+end
+
+# Usage
+agent = CounterAgent.new()
+{agent, directives} = CounterAgent.cmd(agent, {IncrementAction, %{amount: 5}})
+agent.state.counter
+#=> 5
+
+{agent, directives} = CounterAgent.cmd(agent, IncrementAction)
+agent.state.counter
+#=> 6
+```
+
+## Testing Agents
+
+Since agents are pure functions, they're easy to test:
+
+```elixir
+defmodule CounterAgentTest do
+  use ExUnit.Case, async: true
+
+  test "increments counter" do
+    agent = CounterAgent.new()
+    {agent, _directives} = CounterAgent.cmd(agent, {IncrementAction, %{amount: 5}})
+    
+    assert agent.state.counter == 5
+  end
+
+  test "processes action list in sequence" do
+    agent = CounterAgent.new()
+    actions = [
+      {IncrementAction, %{amount: 5}},
+      {IncrementAction, %{amount: 3}},
+      {IncrementAction, %{amount: 2}}
+    ]
+    {agent, _directives} = CounterAgent.cmd(agent, actions)
+    
+    assert agent.state.counter == 10
+  end
+
+  test "validates state schema" do
+    agent = CounterAgent.new()
+    {:ok, agent} = CounterAgent.set(agent, %{counter: "not a number"})
+    
+    # Validation should catch the type error
+    assert {:error, _} = CounterAgent.validate(agent)
+  end
+end
+```
+
+## Advanced: Signal Routing
+
+Agents can define signal routes to map incoming signals to actions:
+
+```elixir
+defmodule MyAgent do
+  use Jido.Agent,
+    name: "my_agent",
+    signal_routes: [
+      {"user.created", HandleUserCreatedAction},
+      {"counter.increment", IncrementAction},
+      {"payment.*", fn s -> s.data.amount > 100 end, LargePaymentAction, 10}
+    ]
+end
+```
+
+When running in an `AgentServer`, signals are automatically routed to the corresponding actions.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Plugins" icon="puzzle-piece" href="/guides/plugins">
+    Learn how to extend agents with reusable plugins
+  </Card>
+  <Card title="Runtime" icon="server" href="/guides/runtime">
+    Run agents in a supervision tree with AgentServer
+  </Card>
+  <Card title="Actions" icon="bolt" href="/concepts/actions">
+    Define actions that transform agent state
+  </Card>
+  <Card title="Directives" icon="arrow-right" href="/concepts/directives">
+    Learn about external effects emitted by agents
+  </Card>
+</CardGroup>
+
+## See Also
+
+- [Actions](/concepts/actions) — Defining actions that transform agent state
+- [State Operations](/concepts/state-operations) — Internal state transitions during `cmd/2`
+- [Directives](/concepts/directives) — External effects emitted by agents
+- [Strategies](/concepts/strategies) — Execution strategies for `cmd/2`
+- `Jido.Agent` — Full module documentation

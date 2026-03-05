@@ -1,0 +1,552 @@
+---
+title: "Jido.AgentServer"
+description: "GenServer runtime for executing agent directives and managing lifecycle"
+---
+
+# Jido.AgentServer
+
+GenServer runtime for Jido agents. AgentServer is the "Act" side of the framework: while Agents "think" (pure decision logic via `cmd/2`), AgentServer "acts" by executing the directives they emit.
+
+## Architecture
+
+- Single GenServer per agent under `Jido.AgentSupervisor`
+- Internal directive queue with drain loop for non-blocking processing
+- Registry-based naming via `Jido.Registry`
+- Logical parent-child hierarchy via state tracking + monitors
+
+## Signal Flow
+
+```
+Signal → AgentServer.call/cast
+      → route_signal_to_action
+      → Agent.cmd/2
+      → {agent, directives}
+      → Directives queued
+      → Drain loop executes via DirectiveExec protocol
+```
+
+## Starting an AgentServer
+
+### `start/1`
+
+Starts an AgentServer under `Jido.AgentSupervisor`.
+
+<ParamField path="opts" type="keyword() | map()" required>
+  Configuration options
+</ParamField>
+
+<ResponseField name="return" type="DynamicSupervisor.on_start_child()">
+  Returns `{:ok, pid}` or error
+</ResponseField>
+
+**Example:**
+
+```elixir
+{:ok, pid} = Jido.AgentServer.start(agent: MyAgent)
+{:ok, pid} = Jido.AgentServer.start(agent: MyAgent, id: "my-agent")
+```
+
+### `start_link/1`
+
+Starts an AgentServer linked to the calling process.
+
+<ParamField path="opts" type="keyword() | map()" required>
+  Configuration options. See Options section below
+</ParamField>
+
+<ResponseField name="return" type="GenServer.on_start()">
+  Returns `{:ok, pid}` or error
+</ResponseField>
+
+**Example:**
+
+```elixir
+{:ok, pid} = Jido.AgentServer.start_link(agent: MyAgent)
+{:ok, pid} = Jido.AgentServer.start_link(jido: MyApp.Jido, agent: MyAgent)
+{:ok, pid} = Jido.AgentServer.start_link(
+  agent: MyAgent,
+  id: "custom-123",
+  initial_state: %{counter: 42}
+)
+```
+
+## Options
+
+<ParamField path="jido" type="atom()">
+  Jido instance name for registry scoping. Default: `Jido`
+</ParamField>
+
+<ParamField path="agent" type="module() | struct()" required>
+  Agent module or struct to run
+</ParamField>
+
+<ParamField path="agent_module" type="module()">
+  Explicit agent module when `:agent` is a struct
+</ParamField>
+
+<ParamField path="id" type="String.t()">
+  Instance ID (auto-generated if not provided)
+</ParamField>
+
+<ParamField path="initial_state" type="map()">
+  Initial state map for agent
+</ParamField>
+
+<ParamField path="registry" type="module()">
+  Registry module. Default: `Jido.Registry`
+</ParamField>
+
+<ParamField path="default_dispatch" type="term()">
+  Default dispatch config for Emit directives
+</ParamField>
+
+<ParamField path="error_policy" type="term()">
+  Error handling policy
+</ParamField>
+
+<ParamField path="max_queue_size" type="pos_integer()">
+  Max directive queue size. Default: `10_000`
+</ParamField>
+
+<ParamField path="parent" type="term()">
+  Parent reference for hierarchy
+</ParamField>
+
+<ParamField path="on_parent_death" type=":stop | :continue | :emit_orphan">
+  Behavior when parent dies
+</ParamField>
+
+<ParamField path="spawn_fun" type="function()">
+  Custom function for spawning children
+</ParamField>
+
+<ParamField path="debug" type="boolean()">
+  Enable debug mode with event buffer. Default: `false`
+</ParamField>
+
+## Agent Resolution
+
+The `:agent` option accepts:
+
+- **Module name** - Must implement `new/0` or `new/1`
+  - `new/1` receives `[id: id, state: initial_state]` as keyword options
+  - `new/0` creates agent with defaults
+- **Agent struct** - Used directly
+  - Provide `:agent_module` option to specify the module
+  - The struct's ID takes precedence over the `:id` option
+
+**Example:**
+
+```elixir
+# Module with new/1
+{:ok, pid} = AgentServer.start_link(
+  agent: MyAgent,
+  id: "my-id",
+  initial_state: %{counter: 42}
+)
+
+# Pre-built struct
+agent = MyAgent.new(id: "prebuilt", state: %{value: 99})
+{:ok, pid} = AgentServer.start_link(agent: agent, agent_module: MyAgent)
+```
+
+## Signal Processing
+
+### `call/3`
+
+Synchronously sends a signal and waits for processing.
+
+<ParamField path="server" type="pid() | String.t()" required>
+  Agent server reference (pid or registered ID)
+</ParamField>
+
+<ParamField path="signal" type="Jido.Signal.t()" required>
+  Signal to send
+</ParamField>
+
+<ParamField path="timeout" type="timeout()">
+  Timeout in milliseconds. Default from config
+</ParamField>
+
+<ResponseField name="return" type="{:ok, struct()} | {:error, term()}">
+  Updated agent struct or error
+</ResponseField>
+
+**Example:**
+
+```elixir
+{:ok, agent} = Jido.AgentServer.call(pid, signal)
+{:ok, agent} = Jido.AgentServer.call("agent-id", signal, 10_000)
+```
+
+### `cast/2`
+
+Asynchronously sends a signal for processing.
+
+<ParamField path="server" type="pid() | String.t()" required>
+  Agent server reference
+</ParamField>
+
+<ParamField path="signal" type="Jido.Signal.t()" required>
+  Signal to send
+</ParamField>
+
+<ResponseField name="return" type=":ok | {:error, term()}">
+  Returns `:ok` or error
+</ResponseField>
+
+**Example:**
+
+```elixir
+:ok = Jido.AgentServer.cast(pid, signal)
+:ok = Jido.AgentServer.cast("agent-id", signal)
+```
+
+## State and Status
+
+### `state/1`
+
+Gets the full State struct for an agent.
+
+<ParamField path="server" type="pid() | String.t()" required>
+  Agent server reference
+</ParamField>
+
+<ResponseField name="return" type="{:ok, State.t()} | {:error, term()}">
+  Full State struct or error
+</ResponseField>
+
+**Example:**
+
+```elixir
+{:ok, state} = Jido.AgentServer.state(pid)
+{:ok, state} = Jido.AgentServer.state("agent-id")
+```
+
+### `status/1`
+
+Gets runtime status for an agent process.
+
+<ParamField path="server" type="pid() | String.t()" required>
+  Agent server reference
+</ParamField>
+
+<ResponseField name="return" type="{:ok, Status.t()} | {:error, term()}">
+  Status struct with snapshot and metadata
+</ResponseField>
+
+Returns a `Status` struct combining the strategy snapshot with process metadata.
+
+**Example:**
+
+```elixir
+{:ok, agent_status} = Jido.AgentServer.status(pid)
+
+if agent_status.snapshot.done? do
+  IO.puts("Result: " <> inspect(agent_status.snapshot.result))
+end
+
+case Status.status(agent_status) do
+  :success -> {:done, Status.result(agent_status)}
+  :failure -> {:error, Status.details(agent_status)}
+  _ -> :continue
+end
+```
+
+### `stream_status/2`
+
+Streams status updates by polling at regular intervals.
+
+<ParamField path="server" type="pid() | String.t()" required>
+  Agent server reference
+</ParamField>
+
+<ParamField path="opts" type="keyword()">
+  Options including `:interval_ms` (default: 100)
+</ParamField>
+
+<ResponseField name="return" type="Enumerable.t()">
+  Stream that yields status snapshots
+</ResponseField>
+
+**Example:**
+
+```elixir
+# Poll until completion
+AgentServer.stream_status(pid, interval_ms: 50)
+|> Enum.reduce_while(nil, fn status, _acc ->
+  case Status.status(status) do
+    :success -> {:halt, {:ok, Status.result(status)}}
+    :failure -> {:halt, {:error, Status.details(status)}}
+    _ -> {:cont, nil}
+  end
+end)
+
+# Take first 10 snapshots
+AgentServer.stream_status(pid)
+|> Enum.take(10)
+```
+
+## Completion Detection
+
+### `await_completion/2`
+
+Wait for an agent to reach a terminal status (`:completed` or `:failed`).
+
+<ParamField path="server" type="pid() | String.t()" required>
+  Agent server reference
+</ParamField>
+
+<ParamField path="opts" type="keyword()">
+  Options including `:timeout`, `:status_path`, `:result_path`, `:error_path`
+</ParamField>
+
+<ResponseField name="return" type="{:ok, map()} | {:error, term()}">
+  Returns `{:ok, %{status: status, result: result}}` or error
+</ResponseField>
+
+This is an event-driven wait - the caller blocks until the agent's state transitions to a terminal status, then receives the result immediately. No polling is involved.
+
+**Options:**
+
+- `:timeout` - Timeout in milliseconds
+- `:status_path` - Path to status field in agent.state (default: `[:status]`)
+- `:result_path` - Path to result field (default: `[:last_answer]`)
+- `:error_path` - Path to error field (default: `[:error]`)
+
+**Example:**
+
+```elixir
+{:ok, result} = AgentServer.await_completion(pid, timeout: 10_000)
+
+{:ok, result} = AgentServer.await_completion(pid,
+  timeout: 10_000,
+  status_path: [:__strategy__, :status],
+  result_path: [:__strategy__, :result]
+)
+```
+
+**Timeout Diagnostics:**
+
+When timeout occurs, returns diagnostic information:
+
+```elixir
+{:error, {:timeout, %{
+  hint: "Agent is idle but await_completion is blocking",
+  server_status: :idle,
+  queue_length: 0,
+  iteration: nil,
+  waited_ms: 5000
+}}}
+```
+
+## Debugging
+
+### `set_debug/2`
+
+Enables or disables debug mode at runtime.
+
+<ParamField path="server" type="pid() | String.t()" required>
+  Agent server reference
+</ParamField>
+
+<ParamField path="enabled" type="boolean()" required>
+  Enable (true) or disable (false) debug mode
+</ParamField>
+
+<ResponseField name="return" type=":ok | {:error, term()}">
+  Confirmation or error
+</ResponseField>
+
+**Example:**
+
+```elixir
+:ok = AgentServer.set_debug(pid, true)
+# ... run some operations ...
+{:ok, events} = AgentServer.recent_events(pid)
+```
+
+### `recent_events/2`
+
+Retrieves recent debug events from the agent's event buffer.
+
+<ParamField path="server" type="pid() | String.t()" required>
+  Agent server reference
+</ParamField>
+
+<ParamField path="opts" type="keyword()">
+  Options including `:limit` (default: all, max 50)
+</ParamField>
+
+<ResponseField name="return" type="{:ok, [map()]} | {:error, term()}">
+  List of debug events (newest-first) or error
+</ResponseField>
+
+Each event includes:
+- `:at` - Monotonic timestamp in milliseconds
+- `:type` - Event type atom (`:signal_received`, `:directive_started`, etc.)
+- `:data` - Event-specific data map
+
+Returns `{:error, :debug_not_enabled}` if debug mode is off.
+
+**Example:**
+
+```elixir
+{:ok, events} = AgentServer.recent_events(pid, limit: 10)
+```
+
+## Registry and Lookup
+
+### `whereis/2`
+
+Looks up an agent by ID in a specific registry.
+
+<ParamField path="registry" type="module()" required>
+  Registry module
+</ParamField>
+
+<ParamField path="id" type="String.t()" required>
+  Agent ID to look up
+</ParamField>
+
+<ResponseField name="return" type="pid() | nil">
+  Returns pid if found, nil otherwise
+</ResponseField>
+
+**Example:**
+
+```elixir
+pid = Jido.AgentServer.whereis(MyApp.Jido.Registry, "agent-123")
+# => #PID<0.123.0>
+```
+
+### `via_tuple/2`
+
+Returns a via tuple for Registry-based naming.
+
+<ParamField path="id" type="String.t()" required>
+  Agent ID
+</ParamField>
+
+<ParamField path="registry" type="module()" required>
+  Registry module
+</ParamField>
+
+<ResponseField name="return" type="{:via, Registry, {module(), String.t()}}">
+  Via tuple for GenServer operations
+</ResponseField>
+
+**Example:**
+
+```elixir
+name = Jido.AgentServer.via_tuple("agent-id", MyApp.Jido.Registry)
+GenServer.call(name, :get_state)
+```
+
+### `alive?/1`
+
+Check if the agent server process is alive.
+
+<ParamField path="server" type="pid() | String.t()" required>
+  Agent server reference
+</ParamField>
+
+<ResponseField name="return" type="boolean()">
+  True if alive, false otherwise
+</ResponseField>
+
+## Attachment API
+
+For integration with `Jido.Agent.InstanceManager`:
+
+### `attach/2`
+
+Attaches a process to this agent, tracking it as an active consumer.
+
+<ParamField path="server" type="pid() | String.t()" required>
+  Agent server reference
+</ParamField>
+
+<ParamField path="owner_pid" type="pid()">
+  Process to attach. Default: `self()`
+</ParamField>
+
+<ResponseField name="return" type=":ok | {:error, term()}">
+  Confirmation or error
+</ResponseField>
+
+When attached, the agent will not idle-timeout. The agent monitors the attached process and automatically detaches it on exit.
+
+**Example:**
+
+```elixir
+{:ok, pid} = Jido.Agent.InstanceManager.get(:sessions, key)
+:ok = Jido.AgentServer.attach(pid)
+
+# With explicit owner
+:ok = Jido.AgentServer.attach(pid, socket_pid)
+```
+
+### `detach/2`
+
+Detaches a process from this agent.
+
+<ParamField path="server" type="pid() | String.t()" required>
+  Agent server reference
+</ParamField>
+
+<ParamField path="owner_pid" type="pid()">
+  Process to detach. Default: `self()`
+</ParamField>
+
+<ResponseField name="return" type=":ok | {:error, term()}">
+  Confirmation or error
+</ResponseField>
+
+**Example:**
+
+```elixir
+:ok = Jido.AgentServer.detach(pid)
+```
+
+### `touch/1`
+
+Touches the agent to reset the idle timer.
+
+<ParamField path="server" type="pid() | String.t()" required>
+  Agent server reference
+</ParamField>
+
+<ResponseField name="return" type=":ok | {:error, term()}">
+  Confirmation or error
+</ResponseField>
+
+Use this for request-based activity tracking (e.g., HTTP requests) where you don't want to maintain a persistent attachment.
+
+**Example:**
+
+```elixir
+# In a controller
+{:ok, pid} = Jido.Agent.InstanceManager.get(:sessions, key)
+:ok = Jido.AgentServer.touch(pid)
+```
+
+## Completion Convention
+
+Agents signal completion via **state**, not process death:
+
+```elixir
+# In your strategy/agent, set terminal status:
+agent = put_in(agent.state.status, :completed)
+agent = put_in(agent.state.last_answer, answer)
+
+# External code polls for completion:
+{:ok, state} = AgentServer.state(server)
+case state.agent.state.status do
+  :completed -> state.agent.state.last_answer
+  :failed -> {:error, state.agent.state.error}
+  _ -> :still_running
+end
+```
+
+**Do NOT** use `{:stop, ...}` from DirectiveExec for normal completion—this causes race conditions with async work and skips lifecycle hooks.

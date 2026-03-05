@@ -1,0 +1,169 @@
+---
+title: "Strategy.Direct"
+description: "Default execution strategy that runs instructions immediately"
+---
+
+## Overview
+
+The `Jido.Agent.Strategy.Direct` is the default execution strategy that runs instructions immediately and sequentially. This provides the simplest execution model for agents.
+
+## Behavior
+
+This strategy:
+- Executes each instruction via `Jido.Exec.run/1`
+- Merges results into agent state
+- Applies state operations (e.g., `StateOp.SetState`) to the agent
+- Returns only external directives to the caller
+- Optionally tracks instruction execution in Thread when `thread?` is enabled
+
+## When to Use
+
+Use Direct strategy when you need:
+- Simple, immediate action execution
+- Sequential processing without workflow control
+- Minimal overhead and complexity
+- Default agent behavior
+
+This is the default strategy for all agents unless explicitly configured otherwise.
+
+## Configuration
+
+Direct strategy is the default and requires no configuration:
+
+```elixir
+defmodule MyAgent do
+  use Jido.Agent,
+    name: "my_agent"
+    # Direct strategy is used by default
+end
+```
+
+Explicit configuration:
+
+```elixir
+defmodule MyAgent do
+  use Jido.Agent,
+    name: "my_agent",
+    strategy: Jido.Agent.Strategy.Direct
+end
+```
+
+## Thread Tracking
+
+When `thread?` option is enabled, the strategy will track instruction execution:
+
+```elixir
+agent = MyAgent.new()
+agent = Agent.cmd(agent, MyAction, strategy_opts: [thread?: true])
+```
+
+With thread tracking enabled:
+- Ensures a Thread exists in agent state
+- Appends `:instruction_start` entry before each instruction
+- Appends `:instruction_end` entry after each instruction (with status `:ok` or `:error`)
+
+Thread tracking is also automatically enabled if a thread already exists in agent state.
+
+## Execution Flow
+
+1. **Receives instructions** - List of normalized `Instruction` structs
+2. **Optional thread setup** - Creates thread if `thread?` is enabled
+3. **Sequential processing** - For each instruction:
+   - Appends `:instruction_start` to thread (if tracking)
+   - Executes instruction via `Jido.Exec.run/1`
+   - Applies result to agent state
+   - Applies state operations and collects directives
+   - Appends `:instruction_end` to thread (if tracking)
+4. **Returns results** - Updated agent and collected directives
+
+## Example Usage
+
+### Basic Execution
+
+```elixir
+defmodule MyAgent do
+  use Jido.Agent, name: "my_agent"
+end
+
+defmodule AddAction do
+  use Jido.Action,
+    name: "add",
+    schema: [
+      value: [type: :integer, required: true]
+    ]
+
+  def run(%{value: value}, context) do
+    current = Map.get(context.state, :total, 0)
+    {:ok, %{total: current + value}}
+  end
+end
+
+agent = MyAgent.new()
+{agent, _directives} = MyAgent.cmd(agent, {AddAction, %{value: 5}})
+# agent.state.total == 5
+```
+
+### With Thread Tracking
+
+```elixir
+agent = MyAgent.new()
+{agent, _} = MyAgent.cmd(agent, {AddAction, %{value: 5}}, strategy_opts: [thread?: true])
+{agent, _} = MyAgent.cmd(agent, {AddAction, %{value: 3}})
+
+# Access thread to see execution history
+thread = agent.state.__thread__
+# Contains entries:
+# - :instruction_start for first AddAction
+# - :instruction_end for first AddAction (status: :ok)
+# - :instruction_start for second AddAction
+# - :instruction_end for second AddAction (status: :ok)
+```
+
+### Error Handling
+
+```elixir
+defmodule FailingAction do
+  use Jido.Action, name: "failing"
+
+  def run(_params, _context) do
+    {:error, "Something went wrong"}
+  end
+end
+
+{agent, directives} = MyAgent.cmd(agent, FailingAction)
+# directives contains %Directive.Error{error: error, context: :instruction}
+```
+
+## State Management
+
+Direct strategy applies instruction results directly to agent state:
+
+```elixir
+# Action returns {:ok, %{count: 5}}
+# Result is merged into agent.state
+agent.state.count == 5
+
+# Action returns {:ok, result, effects}
+# Result is merged, then state operations are applied
+# External directives are collected and returned
+```
+
+## Directives
+
+Direct strategy handles directives in two ways:
+
+1. **State operations** - Applied directly to agent state (e.g., `StateOp.SetState`)
+2. **External directives** - Returned to caller for handling by AgentServer
+
+External directives include:
+- `Directive.Error` - Emitted when instruction execution fails
+- `Directive.Emit` - Signal emissions from actions
+- `Directive.SpawnAgent` - Child agent spawning
+- And others from instruction execution
+
+## Related
+
+- [Strategy](/api/strategy) - Strategy behaviour overview
+- [FSM Strategy](/api/strategy-fsm) - Finite state machine strategy
+- [Agent](/api/agent) - Agent module
+- [Actions](/concepts/actions) - Action system

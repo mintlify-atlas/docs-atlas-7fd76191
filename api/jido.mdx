@@ -1,0 +1,473 @@
+---
+title: "Jido"
+description: "Foundational framework for building autonomous, distributed agent systems in Elixir"
+---
+
+# Jido
+
+The main Jido module provides the supervisor and runtime infrastructure for agent systems.
+
+## Quick Start
+
+Create a Jido supervisor in your application:
+
+```elixir
+defmodule MyApp.Jido do
+  use Jido, otp_app: :my_app
+end
+```
+
+Add to your supervision tree:
+
+```elixir
+children = [MyApp.Jido]
+```
+
+## Core Concepts
+
+- **Agents** — Immutable structs updated via commands
+- **Actions** — Functions that transform agent state (may perform side effects)
+- **Directives** — Descriptions of external effects (signals, processes, etc.)
+
+## Supervisor Setup
+
+### `use Jido`
+
+Creates a Jido supervisor module.
+
+<ParamField path="otp_app" type="atom" required>
+  Your application name (e.g., `:my_app`)
+</ParamField>
+
+<ParamField path="storage" type="{module(), keyword()}">
+  Storage backend configuration. Default: `{Jido.Storage.ETS, [table: :jido_storage]}`
+</ParamField>
+
+<ParamField path="default_plugins" type="list | false | map">
+  Override default plugins. `false` to disable all, or map of plugin overrides
+</ParamField>
+
+**Example:**
+
+```elixir
+defmodule MyApp.Jido do
+  use Jido, otp_app: :my_app
+end
+
+# Then add to supervision tree
+children = [MyApp.Jido]
+```
+
+**Optional configuration:**
+
+```elixir
+config :my_app, MyApp.Jido,
+  max_tasks: 2000,
+  agent_pools: []
+```
+
+## Lifecycle Functions
+
+### `start/1`
+
+Start the default Jido instance for scripts and Livebook.
+
+<ParamField path="opts" type="keyword()">
+  Configuration options. `:name` defaults to `Jido.Default`
+</ParamField>
+
+<ResponseField name="return" type="{:ok, pid()} | {:error, term()}">
+  Returns `{:ok, pid}` even if already started (idempotent)
+</ResponseField>
+
+**Example:**
+
+```elixir
+# In a script or Livebook
+{:ok, _} = Jido.start()
+{:ok, pid} = Jido.start_agent(Jido.default_instance(), MyAgent)
+
+# With custom options
+{:ok, _} = Jido.start(max_tasks: 2000)
+```
+
+### `stop/1`
+
+Stop a Jido instance.
+
+<ParamField path="name" type="atom()">
+  Jido instance name. Defaults to `Jido.Default`
+</ParamField>
+
+<ResponseField name="return" type=":ok">
+  Always returns `:ok`
+</ResponseField>
+
+**Example:**
+
+```elixir
+Jido.stop()
+Jido.stop(MyApp.Jido)
+```
+
+### `start_link/1`
+
+Starts a Jido instance supervisor.
+
+<ParamField path="opts" type="keyword()" required>
+  Configuration options. Must include `:name`
+</ParamField>
+
+<ResponseField name="return" type="{:ok, pid()} | {:error, term()}">
+  Supervisor start result
+</ResponseField>
+
+**Example:**
+
+```elixir
+{:ok, pid} = Jido.start_link(name: MyApp.Jido)
+```
+
+## Agent Management
+
+### `start_agent/3`
+
+Starts an agent under a specific Jido instance.
+
+<ParamField path="jido_instance" type="atom()" required>
+  The Jido instance name
+</ParamField>
+
+<ParamField path="agent" type="module() | struct()" required>
+  Agent module or struct to start
+</ParamField>
+
+<ParamField path="opts" type="keyword()">
+  Options including `:id` and `:initial_state`
+</ParamField>
+
+<ResponseField name="return" type="DynamicSupervisor.on_start_child()">
+  Returns `{:ok, pid}` on success
+</ResponseField>
+
+**Example:**
+
+```elixir
+{:ok, pid} = Jido.start_agent(MyApp.Jido, MyAgent)
+{:ok, pid} = Jido.start_agent(MyApp.Jido, MyAgent, id: "custom-id")
+```
+
+### `stop_agent/2`
+
+Stops an agent by pid or id.
+
+<ParamField path="jido_instance" type="atom()" required>
+  The Jido instance name
+</ParamField>
+
+<ParamField path="pid_or_id" type="pid() | String.t()" required>
+  Agent process identifier or ID string
+</ParamField>
+
+<ResponseField name="return" type=":ok | {:error, :not_found}">
+  Result of stop operation
+</ResponseField>
+
+**Example:**
+
+```elixir
+:ok = Jido.stop_agent(MyApp.Jido, pid)
+:ok = Jido.stop_agent(MyApp.Jido, "agent-id")
+```
+
+### `whereis/2`
+
+Looks up an agent by ID in a Jido instance's registry.
+
+<ParamField path="jido_instance" type="atom()" required>
+  The Jido instance name
+</ParamField>
+
+<ParamField path="id" type="String.t()" required>
+  Agent ID to look up
+</ParamField>
+
+<ResponseField name="return" type="pid() | nil">
+  Returns pid if found, nil otherwise
+</ResponseField>
+
+**Example:**
+
+```elixir
+pid = Jido.whereis(MyApp.Jido, "agent-123")
+```
+
+### `list_agents/1`
+
+Lists all agents running in a Jido instance.
+
+<ParamField path="jido_instance" type="atom()" required>
+  The Jido instance name
+</ParamField>
+
+<ResponseField name="return" type="[{String.t(), pid()}]">
+  List of `{id, pid}` tuples
+</ResponseField>
+
+**Example:**
+
+```elixir
+agents = Jido.list_agents(MyApp.Jido)
+# => [{"agent-1", #PID<0.123.0>}, {"agent-2", #PID<0.124.0>}]
+```
+
+### `agent_count/1`
+
+Returns the count of running agents in a Jido instance.
+
+<ParamField path="jido_instance" type="atom()" required>
+  The Jido instance name
+</ParamField>
+
+<ResponseField name="return" type="non_neg_integer()">
+  Number of running agents
+</ResponseField>
+
+**Example:**
+
+```elixir
+count = Jido.agent_count(MyApp.Jido)
+# => 5
+```
+
+## Persistence
+
+### `hibernate/2`
+
+Hibernate an agent using the given Jido instance.
+
+<ParamField path="jido_instance" type="atom()" required>
+  The Jido instance name
+</ParamField>
+
+<ParamField path="agent" type="Jido.Agent.t()" required>
+  The agent to hibernate
+</ParamField>
+
+<ResponseField name="return" type=":ok | {:error, term()}">
+  Result of hibernation
+</ResponseField>
+
+### `thaw/3`
+
+Thaw an agent using the given Jido instance.
+
+<ParamField path="jido_instance" type="atom()" required>
+  The Jido instance name
+</ParamField>
+
+<ParamField path="agent_module" type="module()" required>
+  The agent module
+</ParamField>
+
+<ParamField path="key" type="term()" required>
+  Storage key for the hibernated agent
+</ParamField>
+
+<ResponseField name="return" type="{:ok, Jido.Agent.t()} | {:error, term()}">
+  Restored agent or error
+</ResponseField>
+
+## Discovery
+
+### `list_actions/1`
+
+Lists discovered Actions with optional filtering.
+
+<ParamField path="opts" type="keyword()">
+  Filter options
+</ParamField>
+
+<ResponseField name="return" type="list()">
+  List of discovered action modules
+</ResponseField>
+
+### `list_sensors/1`
+
+Lists discovered Sensors with optional filtering.
+
+### `list_plugins/1`
+
+Lists discovered Plugins with optional filtering.
+
+### `list_demos/1`
+
+Lists discovered Demos with optional filtering.
+
+### `get_action_by_slug/1`
+
+Gets an Action by its slug.
+
+### `get_sensor_by_slug/1`
+
+Gets a Sensor by its slug.
+
+### `get_plugin_by_slug/1`
+
+Gets a Plugin by its slug.
+
+### `refresh_discovery/0`
+
+Refreshes the Discovery catalog.
+
+## Coordination
+
+### `await/3`
+
+Wait for an agent to reach a terminal status.
+
+<ParamField path="server" type="pid() | String.t()" required>
+  Agent server reference
+</ParamField>
+
+<ParamField path="timeout_ms" type="non_neg_integer()">
+  Timeout in milliseconds. Default from config
+</ParamField>
+
+<ParamField path="opts" type="keyword()">
+  Additional options for completion detection
+</ParamField>
+
+<ResponseField name="return" type="{:ok, map()} | {:error, term()}">
+  Completion result with status and data
+</ResponseField>
+
+See `Jido.Await.completion/3` for details.
+
+### `await_child/4`
+
+Wait for a child agent to reach a terminal status.
+
+See `Jido.Await.child/4` for details.
+
+### `await_all/3`
+
+Wait for all agents to reach terminal status.
+
+See `Jido.Await.all/3` for details.
+
+### `await_any/3`
+
+Wait for any agent to reach terminal status.
+
+See `Jido.Await.any/3` for details.
+
+### `get_children/1`
+
+Get the PIDs of all children of a parent agent.
+
+See `Jido.Await.get_children/1` for details.
+
+### `get_child/2`
+
+Get a specific child's PID by tag.
+
+See `Jido.Await.get_child/2` for details.
+
+### `alive?/1`
+
+Check if an agent process is alive and responding.
+
+See `Jido.Await.alive?/1` for details.
+
+### `cancel/2`
+
+Request graceful cancellation of an agent.
+
+See `Jido.Await.cancel/2` for details.
+
+## Debug Utilities
+
+### `debug/0`
+
+Controls debug mode for the default Jido instance.
+
+<ResponseField name="return" type=":off | :on | :verbose">
+  Current debug level
+</ResponseField>
+
+### `debug/1`
+
+Enables debug mode at a specific level.
+
+<ParamField path="level" type=":off | :on | :verbose" required>
+  Debug level to set
+</ParamField>
+
+<ResponseField name="return" type=":ok">
+  Confirmation
+</ResponseField>
+
+**Example:**
+
+```elixir
+Jido.debug(:on)
+Jido.debug(:verbose)
+Jido.debug(:off)
+```
+
+### `debug/2`
+
+Enables debug mode with additional options.
+
+<ParamField path="level" type=":off | :on | :verbose" required>
+  Debug level to set
+</ParamField>
+
+<ParamField path="opts" type="keyword()" required>
+  Options like `[redact: false]`
+</ParamField>
+
+**Example:**
+
+```elixir
+Jido.debug(:on, redact: false)
+```
+
+## Utility Functions
+
+### `generate_id/0`
+
+Generate a unique identifier.
+
+<ResponseField name="return" type="String.t()">
+  A unique ID string
+</ResponseField>
+
+### `default_instance/0`
+
+Returns the default Jido instance name.
+
+<ResponseField name="return" type="atom()">
+  Returns `Jido.Default`
+</ResponseField>
+
+### `registry_name/1`
+
+Returns the Registry name for a Jido instance.
+
+### `agent_supervisor_name/1`
+
+Returns the AgentSupervisor name for a Jido instance.
+
+### `task_supervisor_name/1`
+
+Returns the TaskSupervisor name for a Jido instance.
+
+### `scheduler_name/1`
+
+Returns the Scheduler name for a Jido instance.
+
+### `agent_pool_name/2`
+
+Returns the AgentPool name for a specific pool in a Jido instance.

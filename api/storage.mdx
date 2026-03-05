@@ -1,0 +1,235 @@
+---
+title: "Storage"
+description: "Unified storage behaviour for agent checkpoints and thread journals"
+---
+
+## Overview
+
+Unified storage behaviour for agent checkpoints and thread journals. Implementations handle both:
+
+- **Checkpoints**: key-value overwrite semantics for agent state snapshots
+- **Journals**: append-only thread entries with sequence ordering
+
+## Built-in Adapters
+
+| Adapter | Durability | Use Case |
+|---------|------------|---------|
+| `Jido.Storage.ETS` | Ephemeral | Development, testing |
+
+## Callbacks
+
+### get_checkpoint/2
+
+Retrieve a checkpoint by key.
+
+<ParamField path="key" type="any" required>
+  The checkpoint key.
+</ParamField>
+
+<ParamField path="opts" type="keyword" required>
+  Storage options.
+</ParamField>
+
+<ResponseField name="return" type="{:ok, any} | :not_found | {:error, term}">
+  The checkpoint data if found, `:not_found` if the key doesn't exist, or error.
+</ResponseField>
+
+### put_checkpoint/3
+
+Store a checkpoint, overwriting any existing value for the key.
+
+<ParamField path="key" type="any" required>
+  The checkpoint key.
+</ParamField>
+
+<ParamField path="data" type="any" required>
+  The checkpoint data to store.
+</ParamField>
+
+<ParamField path="opts" type="keyword" required>
+  Storage options.
+</ParamField>
+
+<ResponseField name="return" type=":ok | {:error, term}">
+  Success or error.
+</ResponseField>
+
+### delete_checkpoint/2
+
+Delete a checkpoint by key. Returns `:ok` even if the key didn't exist.
+
+<ParamField path="key" type="any" required>
+  The checkpoint key.
+</ParamField>
+
+<ParamField path="opts" type="keyword" required>
+  Storage options.
+</ParamField>
+
+<ResponseField name="return" type=":ok | {:error, term}">
+  Success or error.
+</ResponseField>
+
+### load_thread/2
+
+Load a thread by ID, reconstructing from stored entries.
+
+<ParamField path="thread_id" type="string" required>
+  The thread ID.
+</ParamField>
+
+<ParamField path="opts" type="keyword" required>
+  Storage options.
+</ParamField>
+
+<ResponseField name="return" type="{:ok, Thread.t()} | :not_found | {:error, term}">
+  The reconstructed thread if entries exist, `:not_found` if no entries, or error.
+</ResponseField>
+
+### append_thread/3
+
+Append entries to a thread.
+
+<ParamField path="thread_id" type="string" required>
+  The thread ID.
+</ParamField>
+
+<ParamField path="entries" type="list(Entry.t())" required>
+  Entries to append.
+</ParamField>
+
+<ParamField path="opts" type="keyword" required>
+  Storage options. Supports `:expected_rev` for optimistic concurrency control and `:metadata` for new threads.
+</ParamField>
+
+<ResponseField name="return" type="{:ok, Thread.t()} | {:error, term}">
+  Updated thread on success, or error (`:conflict` if revision mismatch).
+</ResponseField>
+
+**Options:**
+- `:expected_rev` - If provided, the append should fail with `{:error, :conflict}` if the current thread revision doesn't match.
+- `:metadata` - Thread metadata to set (typically only for new threads).
+
+### delete_thread/2
+
+Delete a thread and all its entries. Returns `:ok` even if the thread didn't exist.
+
+<ParamField path="thread_id" type="string" required>
+  The thread ID.
+</ParamField>
+
+<ParamField path="opts" type="keyword" required>
+  Storage options.
+</ParamField>
+
+<ResponseField name="return" type=":ok | {:error, term}">
+  Success or error.
+</ResponseField>
+
+## Helper Functions
+
+### normalize_storage/1
+
+Normalize a storage configuration to `{module, opts}` tuple.
+
+```elixir
+Jido.Storage.normalize_storage(Jido.Storage.ETS)
+# => {Jido.Storage.ETS, []}
+
+Jido.Storage.normalize_storage({Jido.Storage.File, path: "priv/jido"})
+# => {Jido.Storage.File, [path: "priv/jido"]}
+```
+
+### fetch_checkpoint/3
+
+Fetch a checkpoint and normalize not-found semantics. Converts adapter-level `:not_found` into `{:error, :not_found}`.
+
+```elixir
+case Jido.Storage.fetch_checkpoint(Jido.Storage.ETS, "agent-1", []) do
+  {:ok, checkpoint} -> checkpoint
+  {:error, :not_found} -> %{}
+end
+```
+
+### fetch_thread/3
+
+Fetch a thread and normalize not-found semantics. Converts adapter-level `:not_found` into `{:error, :not_found}`.
+
+```elixir
+case Jido.Storage.fetch_thread(Jido.Storage.ETS, "thread-1", []) do
+  {:ok, thread} -> thread
+  {:error, :not_found} -> create_new_thread("thread-1")
+end
+```
+
+## Implementing Custom Adapters
+
+```elixir
+defmodule MyApp.Storage do
+  @behaviour Jido.Storage
+
+  @impl true
+  def get_checkpoint(key, opts) do
+    # Implement checkpoint retrieval
+  end
+
+  @impl true
+  def put_checkpoint(key, data, opts) do
+    # Implement checkpoint storage
+  end
+
+  @impl true
+  def delete_checkpoint(key, opts) do
+    # Implement checkpoint deletion
+  end
+
+  @impl true
+  def load_thread(thread_id, opts) do
+    # Implement thread loading
+  end
+
+  @impl true
+  def append_thread(thread_id, entries, opts) do
+    # Implement thread appending with optional concurrency control
+    expected_rev = Keyword.get(opts, :expected_rev)
+    metadata = Keyword.get(opts, :metadata)
+
+    case get_current_thread(thread_id) do
+      {:ok, thread} when not is_nil(expected_rev) and thread.rev != expected_rev ->
+        {:error, :conflict}
+
+      _ ->
+        # Append entries and update revision
+        {:ok, updated_thread}
+    end
+  end
+
+  @impl true
+  def delete_thread(thread_id, opts) do
+    # Implement thread deletion
+  end
+end
+```
+
+## Concurrency Control
+
+The `append_thread/3` callback accepts an `:expected_rev` option for optimistic concurrency control:
+
+```elixir
+# Load thread
+{:ok, thread} = Jido.Storage.load_thread(adapter, "thread-1", [])
+
+# Append with expected revision
+entries = [Jido.Thread.Entry.new!(type: :user, content: "Hello")]
+
+case adapter.append_thread("thread-1", entries, expected_rev: thread.rev) do
+  {:ok, updated_thread} ->
+    # Append succeeded
+    updated_thread
+
+  {:error, :conflict} ->
+    # Revision mismatch - reload and retry
+    {:ok, fresh_thread} = Jido.Storage.load_thread(adapter, "thread-1", [])
+    retry_append(fresh_thread, entries)
+end
+```

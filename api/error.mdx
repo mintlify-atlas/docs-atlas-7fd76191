@@ -1,0 +1,251 @@
+---
+title: "Error"
+description: "Unified error handling using Splode"
+---
+
+## Overview
+
+Unified error handling for the Jido ecosystem using Splode. Six consolidated error types cover all failure scenarios.
+
+## Error Types
+
+| Error | Use Case |
+|-------|----------|
+| `ValidationError` | Invalid inputs, actions, sensors, configs |
+| `ExecutionError` | Runtime failures during execution or planning |
+| `RoutingError` | Signal routing and dispatch failures |
+| `TimeoutError` | Operation timeouts |
+| `CompensationError` | Saga compensation failures |
+| `InternalError` | Unexpected system failures |
+
+## ValidationError
+
+Error for validation failures. Covers invalid inputs, actions, sensors, and configurations.
+
+<ParamField path="message" type="string" required>
+  Human-readable error message.
+</ParamField>
+
+<ParamField path="kind" type=":input | :action | :sensor | :config">
+  Category of validation error.
+</ParamField>
+
+<ParamField path="subject" type="any">
+  The invalid value (field name, action module, etc.).
+</ParamField>
+
+<ParamField path="details" type="map" default="%{}">
+  Additional context.
+</ParamField>
+
+```elixir
+# Validation failures
+Jido.Error.validation_error("Invalid email", field: :email)
+Jido.Error.validation_error("Unknown action", kind: :action, subject: MyAction)
+Jido.Error.validation_error("Missing config", kind: :config, subject: :api_key)
+```
+
+## ExecutionError
+
+Error for runtime execution failures. Covers action execution and planning failures.
+
+<ParamField path="message" type="string" required>
+  Human-readable error message.
+</ParamField>
+
+<ParamField path="phase" type=":execution | :planning">
+  Where failure occurred.
+</ParamField>
+
+<ParamField path="details" type="map" default="%{}">
+  Additional context.
+</ParamField>
+
+```elixir
+# Execution failures
+Jido.Error.execution_error("Action failed", phase: :run)
+Jido.Error.execution_error("Planning failed", phase: :planning)
+```
+
+## RoutingError
+
+Error for signal routing and dispatch failures.
+
+<ParamField path="message" type="string" required>
+  Human-readable error message.
+</ParamField>
+
+<ParamField path="target" type="any">
+  The intended routing target.
+</ParamField>
+
+<ParamField path="details" type="map" default="%{}">
+  Additional context.
+</ParamField>
+
+```elixir
+# Routing failures
+Jido.Error.routing_error("No handler", target: "user.created")
+Jido.Error.routing_error("Agent not found", target: "agent-123")
+```
+
+## TimeoutError
+
+Error for operation timeouts.
+
+<ParamField path="message" type="string" required>
+  Human-readable error message.
+</ParamField>
+
+<ParamField path="timeout" type="non_neg_integer">
+  The timeout value in milliseconds.
+</ParamField>
+
+<ParamField path="details" type="map" default="%{}">
+  Additional context.
+</ParamField>
+
+```elixir
+# Timeouts
+Jido.Error.timeout_error("Timed out", timeout: 5000)
+Jido.Error.timeout_error("Agent did not respond", timeout: 30_000)
+```
+
+## CompensationError
+
+Error for saga compensation failures.
+
+<ParamField path="message" type="string" required>
+  Human-readable error message.
+</ParamField>
+
+<ParamField path="original_error" type="any">
+  The error that triggered compensation.
+</ParamField>
+
+<ParamField path="compensated" type="boolean" default="false">
+  Whether compensation succeeded.
+</ParamField>
+
+<ParamField path="result" type="any">
+  Result from successful compensation.
+</ParamField>
+
+<ParamField path="details" type="map" default="%{}">
+  Additional context.
+</ParamField>
+
+```elixir
+# Compensation failures
+Jido.Error.compensation_error(
+  "Failed to rollback",
+  original_error: original,
+  compensated: false
+)
+```
+
+## InternalError
+
+Error for unexpected internal failures.
+
+<ParamField path="message" type="string" required>
+  Human-readable error message.
+</ParamField>
+
+<ParamField path="details" type="map" default="%{}">
+  Additional context.
+</ParamField>
+
+```elixir
+# Internal errors
+Jido.Error.internal_error("Unexpected failure")
+Jido.Error.internal_error("System error", details: %{component: :storage})
+```
+
+## Utilities
+
+### to_map/1
+
+Converts an error struct to a normalized map.
+
+```elixir
+error = Jido.Error.validation_error("Invalid input", field: :email)
+map = Jido.Error.to_map(error)
+# => %{
+#   type: :validation_error,
+#   message: "Invalid input",
+#   details: %{},
+#   stacktrace: [...]
+# }
+```
+
+### extract_message/1
+
+Extracts the message string from a nested error structure.
+
+```elixir
+message = Jido.Error.extract_message(error)
+# => "Invalid input"
+```
+
+### format_nimble_config_error/3
+
+Formats a NimbleOptions configuration error.
+
+```elixir
+error = %NimbleOptions.ValidationError{keys_path: [:timeout], message: "expected integer"}
+formatted = Jido.Error.format_nimble_config_error(error, "Action", MyAction)
+# => "Invalid configuration for Action (MyAction) at [:timeout]: expected integer"
+```
+
+### format_nimble_validation_error/3
+
+Formats a NimbleOptions validation error for parameters.
+
+```elixir
+error = %NimbleOptions.ValidationError{keys_path: [:email], message: "is invalid"}
+formatted = Jido.Error.format_nimble_validation_error(error, "Action", MyAction)
+# => "Invalid parameters for Action (MyAction) at [:email]: is invalid"
+```
+
+## Splode Error Classes
+
+Errors are classified for aggregation (in order of precedence):
+
+- `:invalid` - Validation failures
+- `:execution` - Runtime failures
+- `:routing` - Routing/dispatch failures
+- `:timeout` - Timeouts
+- `:internal` - Unexpected failures
+
+## Usage Example
+
+```elixir
+defmodule MyAction do
+  use Jido.Action,
+    name: "my_action",
+    schema: [email: [type: :string, required: true]]
+
+  def run(%{email: email}, _context) do
+    case validate_email(email) do
+      :ok ->
+        {:ok, %{sent: true}}
+
+      {:error, reason} ->
+        {:error, Jido.Error.validation_error(
+          "Invalid email format",
+          field: :email,
+          details: %{reason: reason}
+        )}
+    end
+  end
+
+  defp validate_email(email) do
+    if String.contains?(email, "@") do
+      :ok
+    else
+      {:error, :missing_at_sign}
+    end
+  end
+end
+```

@@ -1,0 +1,319 @@
+---
+title: "Strategy.FSM"
+description: "Finite state machine execution strategy with configurable transitions"
+---
+
+## Overview
+
+The `Jido.Agent.Strategy.FSM` implements FSM-based workflows where instructions trigger state transitions. The FSM state is stored in `agent.state.__strategy__` and provides structured workflow control.
+
+## When to Use
+
+Use FSM strategy when you need:
+- Explicit state-based workflow control
+- Validation of valid state transitions
+- Structured multi-step processes
+- State-dependent behavior
+- Workflow observability and debugging
+
+Examples:
+- Order processing (pending → processing → completed/failed)
+- Document approval workflows
+- Multi-stage data pipelines
+- Request/response protocols
+
+## Configuration
+
+Configure transitions via strategy options:
+
+```elixir
+defmodule MyAgent do
+  use Jido.Agent,
+    name: "fsm_agent",
+    strategy: {Jido.Agent.Strategy.FSM,
+      initial_state: "idle",
+      transitions: %{
+        "idle" => ["processing"],
+        "processing" => ["idle", "completed", "failed"],
+        "completed" => ["idle"],
+        "failed" => ["idle"]
+      }
+    }
+end
+```
+
+## Options
+
+### initial_state
+
+Initial FSM state (default: `"idle"`)
+
+```elixir
+strategy: {Jido.Agent.Strategy.FSM, initial_state: "waiting"}
+```
+
+### transitions
+
+Map of valid transitions `%{from_state => [to_states]}`
+
+```elixir
+transitions: %{
+  "idle" => ["processing"],
+  "processing" => ["completed", "failed"]
+}
+```
+
+### auto_transition
+
+Whether to automatically transition back to initial state after processing (default: `true`)
+
+```elixir
+strategy: {Jido.Agent.Strategy.FSM, auto_transition: false}
+```
+
+When `false`, the FSM remains in its final state (e.g., `"completed"`) until explicitly transitioned.
+
+### thread?
+
+Enable thread tracking for FSM state transitions and instruction execution (default: `false`)
+
+```elixir
+strategy: {Jido.Agent.Strategy.FSM, thread?: true}
+```
+
+## Default Transitions
+
+If no transitions are provided, uses a simple workflow:
+
+```elixir
+%{
+  "idle" => ["processing"],
+  "processing" => ["idle", "completed", "failed"],
+  "completed" => ["idle"],
+  "failed" => ["idle"]
+}
+```
+
+## States
+
+Default states (can be customized via transitions):
+
+- `"idle"` - Initial state, waiting for work
+- `"processing"` - Currently processing instructions
+- `"completed"` - Successfully finished
+- `"failed"` - Terminated with an error
+
+You can define custom states through the `transitions` configuration.
+
+## Execution Flow
+
+1. **Transition to processing** - Validates transition from current state to `"processing"`
+2. **Queue instructions** - Stores instructions in strategy state
+3. **Emit directives** - Returns `RunInstruction` directive for runtime execution
+4. **Handle results** - Receives results via internal `cmd/2` action
+5. **Apply to state** - Merges results and applies state operations
+6. **Next instruction** - Dispatches next queued instruction or finalizes
+7. **Auto-transition** - Returns to initial state if `auto_transition: true`
+
+This keeps strategy `cmd/2` pure while preserving FSM transition semantics.
+
+## Example Usage
+
+### Basic Workflow
+
+```elixir
+defmodule OrderAgent do
+  use Jido.Agent,
+    name: "order_agent",
+    strategy: {Jido.Agent.Strategy.FSM,
+      initial_state: "pending",
+      transitions: %{
+        "pending" => ["processing"],
+        "processing" => ["completed", "failed"],
+        "completed" => ["pending"],
+        "failed" => ["pending"]
+      }
+    }
+end
+
+defmodule ProcessOrderAction do
+  use Jido.Action,
+    name: "process_order",
+    schema: [order_id: [type: :string, required: true]]
+
+  def run(%{order_id: id}, context) do
+    # Process order
+    {:ok, %{order_status: "processed", order_id: id}}
+  end
+end
+
+agent = OrderAgent.new()
+{agent, directives} = OrderAgent.cmd(agent, {ProcessOrderAction, %{order_id: "123"}})
+# FSM transitions: pending -> processing -> (auto) pending
+```
+
+### Check FSM State
+
+```elixir
+# Get snapshot of strategy state
+snapshot = Jido.Agent.Strategy.FSM.snapshot(agent, %{strategy_opts: []})
+
+snapshot.status        # :idle, :running, :success, :failure
+snapshot.done?         # boolean
+snapshot.result        # last execution result
+snapshot.details       # %{processed_count: N, fsm_state: "idle", ...}
+```
+
+### Disable Auto-Transition
+
+```elixir
+defmodule ManualAgent do
+  use Jido.Agent,
+    name: "manual",
+    strategy: {Jido.Agent.Strategy.FSM,
+      auto_transition: false,
+      transitions: %{
+        "idle" => ["processing"],
+        "processing" => ["completed"]
+      }
+    }
+end
+
+{agent, _} = ManualAgent.cmd(agent, MyAction)
+# FSM remains in "completed" state
+# Must manually transition back to "idle" via custom action
+```
+
+### With Thread Tracking
+
+```elixir
+defmodule TrackedAgent do
+  use Jido.Agent,
+    name: "tracked",
+    strategy: {Jido.Agent.Strategy.FSM,
+      thread?: true,
+      initial_state: "idle"
+    }
+end
+
+{agent, _} = TrackedAgent.cmd(agent, MyAction)
+
+# Thread contains checkpoints for FSM transitions
+thread = agent.state.__thread__
+# Entries:
+# - checkpoint: %{event: :transition, fsm_state: "processing"}
+# - instruction_start: ...
+# - instruction_end: ...
+# - checkpoint: %{event: :transition, fsm_state: "idle"}
+```
+
+### Custom States
+
+```elixir
+defmodule ApprovalAgent do
+  use Jido.Agent,
+    name: "approval",
+    strategy: {Jido.Agent.Strategy.FSM,
+      initial_state: "draft",
+      transitions: %{
+        "draft" => ["submitted"],
+        "submitted" => ["under_review"],
+        "under_review" => ["approved", "rejected", "needs_revision"],
+        "needs_revision" => ["draft"],
+        "approved" => ["draft"],
+        "rejected" => ["draft"]
+      }
+    }
+end
+```
+
+## Error Handling
+
+If a transition is invalid:
+
+```elixir
+# Attempting invalid transition
+{agent, directives} = MyAgent.cmd(agent, SomeAction)
+# If FSM cannot transition to "processing" from current state:
+# directives contains %Directive.Error{error: error, context: :fsm_transition}
+```
+
+If an instruction fails:
+
+```elixir
+# Action returns {:error, reason}
+# FSM records error in machine state
+# Emits %Directive.Error{error: error, context: :instruction}
+```
+
+## State Management
+
+FSM strategy maintains internal state in `agent.state.__strategy__`:
+
+```elixir
+%{
+  machine: %Machine{
+    status: "idle",              # Current FSM state
+    processed_count: 0,          # Number of processed instructions
+    last_result: nil,            # Result of last instruction
+    error: nil,                  # Error from last instruction
+    transitions: %{...}          # Transition map
+  },
+  module: Jido.Agent.Strategy.FSM,
+  initial_state: "idle",
+  auto_transition: true,
+  pending_instructions: [],     # Queue of instructions
+  current_instruction: nil,     # Currently executing instruction
+  deferred_directives: []       # Directives to emit after batch
+}
+```
+
+**Do not access this state directly.** Use the `snapshot/2` function for observability.
+
+## Snapshot Interface
+
+The snapshot provides a stable interface to FSM state:
+
+```elixir
+snapshot = Jido.Agent.Strategy.FSM.snapshot(agent, ctx)
+
+snapshot.status               # :idle | :running | :success | :failure
+snapshot.done?                # boolean
+snapshot.result               # last_result from machine
+snapshot.details.processed_count  # instruction count
+snapshot.details.fsm_state    # raw FSM state string
+snapshot.details.error        # error if any
+```
+
+### Status Mapping
+
+- `"idle"` → `:idle`
+- `"processing"` → `:running`
+- `"completed"` → `:success`
+- `"failed"` → `:failure`
+- Custom states → `:idle` (by default)
+
+## Internal Actions
+
+FSM strategy handles a special internal action:
+
+### :fsm_instruction_result
+
+Receives execution results from `RunInstruction` directives. This action should not be called directly by users.
+
+**Payload:**
+```elixir
+%{
+  status: :ok | :error,
+  result: map(),           # When status is :ok
+  effects: [directive()],  # Optional state operations
+  reason: term()           # When status is :error
+}
+```
+
+## Related
+
+- [Strategy](/api/strategy) - Strategy behaviour overview
+- [Direct Strategy](/api/strategy-direct) - Simple immediate execution
+- [Agent](/api/agent) - Agent module
+- [Directives](/api/directive) - Directive system

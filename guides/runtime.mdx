@@ -1,0 +1,455 @@
+---
+title: Runtime
+description: Run agents in a supervision tree and manage parent/child hierarchies
+---
+
+Agents run inside an `AgentServer` GenServer process. This guide covers starting agents, sending signals, and managing parent-child hierarchies.
+
+<Note>
+For complete API details, see `Jido.AgentServer` and `Jido.Await` moduledocs.
+</Note>
+
+## Starting Agents
+
+<Steps>
+
+### Use your instance module (recommended)
+
+```elixir
+{:ok, pid} = MyApp.Jido.start_agent(MyAgent)
+{:ok, pid} = MyApp.Jido.start_agent(MyAgent,
+  id: "custom-id",
+  initial_state: %{counter: 10}
+)
+```
+
+### Or start directly via AgentServer
+
+```elixir
+{:ok, pid} = Jido.AgentServer.start_link(agent: MyAgent)
+{:ok, pid} = Jido.AgentServer.start(agent: MyAgent, jido: MyApp.Jido)
+```
+
+### In a supervision tree
+
+```elixir
+children = [
+  {Jido.AgentServer, agent: MyAgent, id: "worker-1"},
+  {Jido.AgentServer, agent: MyAgent, id: "worker-2"}
+]
+
+Supervisor.start_link(children, strategy: :one_for_one)
+```
+
+</Steps>
+
+## call/3 vs cast/2
+
+**Synchronous** - blocks until signal is processed, returns updated agent:
+
+```elixir
+{:ok, agent} = Jido.AgentServer.call(pid, signal)
+{:ok, agent} = Jido.AgentServer.call(pid, signal, 10_000)  # custom timeout
+```
+
+**Asynchronous** - returns immediately:
+
+```elixir
+:ok = Jido.AgentServer.cast(pid, signal)
+```
+
+## Signal Processing Flow
+
+```
+Signal → AgentServer.call/cast
+       → route_signal_to_action (via strategy/agent/plugin routes)
+       → Agent.cmd/2
+       → {agent, directives}
+       → Directives queued → drain loop via DirectiveExec
+       → (for RunInstruction) execute instruction → call Agent.cmd/2 with result_action
+```
+
+The AgentServer routes incoming signals using strategy, agent, and plugin route tables (`signal_routes/1` callbacks), executes the action via `cmd/2`, and processes any returned directives.
+
+## Working Example
+
+Here's a complete example showing agent runtime usage:
+
+```elixir
+defmodule CounterAgent do
+  use Jido.Agent,
+    name: "counter",
+    schema: [counter: [type: :integer, default: 0]],
+    signal_routes: [{"counter.increment", IncrementAction}]
+end
+
+defmodule IncrementAction do
+  use Jido.Action,
+    name: "increment",
+    schema: [amount: [type: :integer, default: 1]]
+
+  def run(params, context) do
+    current = Map.get(context.state, :counter, 0)
+    {:ok, %{counter: current + params.amount}}
+  end
+end
+
+# Start the agent
+{:ok, pid} = Jido.AgentServer.start_link(agent: CounterAgent.new())
+
+# Send signal synchronously
+signal = Jido.Signal.new!("counter.increment", %{amount: 5})
+{:ok, agent} = Jido.AgentServer.call(pid, signal)
+agent.state.counter
+#=> 5
+
+# Send signal asynchronously
+signal = Jido.Signal.new!("counter.increment", %{amount: 3})
+:ok = Jido.AgentServer.cast(pid, signal)
+
+# Wait a bit for async processing
+Process.sleep(100)
+
+# Check state
+{:ok, state} = Jido.AgentServer.state(pid)
+state.agent.state.counter
+#=> 8
+```
+
+## Parent-Child Hierarchy
+
+### Spawning Children
+
+Emit a `SpawnAgent` directive to create a child agent:
+
+```elixir
+defmodule SpawnWorkerAction do
+  use Jido.Action,
+    name: "spawn_worker"
+
+  def run(_params, _context) do
+    directive = %Jido.Agent.Directive.SpawnAgent{
+      agent: WorkerAgent,
+      tag: :worker_1,
+      opts: [initial_state: %{task: "process_data"}]
+    }
+    {:ok, %{}, [directive]}
+  end
+end
+```
+
+The parent:
+
+- Monitors the child process
+- Tracks children in `state.children` map by tag
+- Receives `jido.agent.child.exit` signals when children exit
+
+### Child Communication
+
+Children can emit signals back to their parent:
+
+```elixir
+defmodule NotifyParentAction do
+  use Jido.Action,
+    name: "notify_parent"
+
+  def run(params, context) do
+    signal = Jido.Signal.new!("worker.completed", %{result: params.result})
+    directive = Jido.Agent.Directive.emit_to_parent(context.agent, signal)
+    {:ok, %{}, [directive]}
+  end
+end
+```
+
+### Stopping Children
+
+```elixir
+directive = %Jido.Agent.Directive.StopChild{tag: :worker_1}
+```
+
+### Complete Parent-Child Example
+
+```elixir
+defmodule ParentAgent do
+  use Jido.Agent,
+    name: "parent",
+    schema: [workers_spawned: [type: :integer, default: 0]],
+    signal_routes: [
+      {"parent.spawn_worker", SpawnWorkerAction},
+      {"worker.completed", HandleWorkerCompletedAction}
+    ]
+end
+
+defmodule WorkerAgent do
+  use Jido.Agent,
+    name: "worker",
+    schema: [task: [type: :string, default: ""]],
+    signal_routes: [{"worker.process", ProcessTaskAction}]
+end
+
+defmodule SpawnWorkerAction do
+  use Jido.Action,
+    name: "spawn_worker"
+
+  def run(_params, context) do
+    count = context.state.workers_spawned + 1
+    directive = %Jido.Agent.Directive.SpawnAgent{
+      agent: WorkerAgent,
+      tag: {:worker, count},
+      opts: [initial_state: %{task: "task_#{count}"}]
+    }
+    {:ok, %{workers_spawned: count}, [directive]}
+  end
+end
+
+defmodule ProcessTaskAction do
+  use Jido.Action,
+    name: "process_task"
+
+  def run(_params, context) do
+    # Simulate work
+    Process.sleep(1000)
+    
+    # Notify parent
+    signal = Jido.Signal.new!("worker.completed", %{task: context.state.task})
+    directive = Jido.Agent.Directive.emit_to_parent(context.agent, signal)
+    
+    {:ok, %{}, [directive]}
+  end
+end
+
+defmodule HandleWorkerCompletedAction do
+  use Jido.Action,
+    name: "handle_worker_completed"
+
+  def run(params, _context) do
+    IO.puts("Worker completed task: #{params.task}")
+    {:ok, %{}}
+  end
+end
+
+# Usage
+{:ok, parent_pid} = Jido.AgentServer.start_link(agent: ParentAgent.new())
+
+# Spawn a worker
+signal = Jido.Signal.new!("parent.spawn_worker", %{})
+{:ok, parent_agent} = Jido.AgentServer.call(parent_pid, signal)
+
+# The worker will process and notify parent
+Process.sleep(1500)
+# => "Worker completed task: task_1"
+```
+
+## Completion Detection
+
+Agents signal completion via **state**, not process death. This allows retrieving results and keeps the agent available for inspection.
+
+```elixir
+# In your agent/strategy - set terminal status
+agent = put_in(agent.state.status, :completed)
+agent = put_in(agent.state.last_answer, result)
+```
+
+Check state externally:
+
+```elixir
+{:ok, state} = Jido.AgentServer.state(pid)
+
+case state.agent.state.status do
+  :completed -> state.agent.state.last_answer
+  :failed -> {:error, state.agent.state.error}
+  _ -> :still_running
+end
+```
+
+## Await Helpers
+
+The `Jido.Await` module provides conveniences for waiting on agent completion.
+
+```elixir
+# Wait for single agent
+{:ok, result} = Jido.await(pid, 10_000)
+
+# Wait for child by tag
+{:ok, result} = Jido.await_child(parent, :worker_1, 30_000)
+
+# Wait for all agents
+{:ok, results} = Jido.await_all([pid1, pid2], 30_000)
+
+# Wait for first completion
+{:ok, {winner, result}} = Jido.await_any([pid1, pid2], 10_000)
+```
+
+### Utilities
+
+```elixir
+Jido.alive?(pid)                    # Check if agent is running
+{:ok, children} = Jido.get_children(parent)  # List child agents
+Jido.cancel(pid)                    # Cancel a running agent
+```
+
+### Timeout Diagnostics
+
+When `await` times out, you get a diagnostic map to help troubleshoot:
+
+```elixir
+case Jido.await(pid, 5_000) do
+  {:ok, result} -> 
+    result
+  {:error, {:timeout, diag}} ->
+    Logger.warning("Agent await timed out", diag)
+    # diag includes: :hint, :server_status, :queue_length, :iteration, :waited_ms
+    {:error, :timeout}
+end
+```
+
+Use the `:hint` and `:server_status` to understand why the agent hasn't completed.
+
+## Debug Mode
+
+AgentServer can record recent events in an in-memory buffer to help diagnose agent behavior without configuring telemetry. Debug mode can be enabled at two levels: for an entire Jido instance (all agents) or for individual agents.
+
+### Instance-Level Debug
+
+Enable debug recording for all agents in a Jido instance.
+
+At boot time via config:
+
+```elixir
+config :my_app, MyApp.Jido, debug: true
+config :my_app, MyApp.Jido, debug: :verbose
+```
+
+Or toggle at runtime:
+
+```elixir
+MyApp.Jido.debug(:on)
+MyApp.Jido.debug(:verbose)
+MyApp.Jido.debug(:off)
+```
+
+Query the current debug level:
+
+```elixir
+MyApp.Jido.debug()
+```
+
+Get full debug status including active agent counts:
+
+```elixir
+MyApp.Jido.debug_status()
+```
+
+When instance-level debug is enabled, recording is turned on for ALL agents managed by that instance.
+
+### Per-Agent Debug
+
+For surgical debugging of a single agent, enable debug mode on a specific process.
+
+At start:
+
+```elixir
+{:ok, pid} = MyApp.Jido.start_agent(MyAgent, debug: true)
+{:ok, pid} = Jido.AgentServer.start_link(agent: MyAgent, debug: true)
+```
+
+Or toggle at runtime:
+
+```elixir
+:ok = Jido.AgentServer.set_debug(pid, true)
+```
+
+### Retrieve Events
+
+```elixir
+{:ok, events} = MyApp.Jido.recent(pid, 20)
+```
+
+Or use the AgentServer API directly:
+
+```elixir
+{:ok, events} = Jido.AgentServer.recent_events(pid, limit: 20)
+```
+
+Inspect the results:
+
+```elixir
+Enum.each(events, fn e ->
+  IO.inspect({e.type, e.data}, label: "event")
+end)
+```
+
+Events are returned newest-first. Each event has:
+
+- `:at` - monotonic timestamp in milliseconds
+- `:type` - event type (`:signal_received`, `:directive_started`)
+- `:data` - event-specific details
+
+The buffer holds up to 500 events by default (configurable via `debug_max_events`). This is a development aid, not an audit log.
+
+## Testing Agents in Runtime
+
+Test agent runtime behavior with `ExUnit`:
+
+```elixir
+defmodule CounterAgentTest do
+  use ExUnit.Case
+
+  test "agent processes signals and updates state" do
+    {:ok, pid} = Jido.AgentServer.start_link(agent: CounterAgent.new())
+    
+    signal = Jido.Signal.new!("counter.increment", %{amount: 5})
+    {:ok, agent} = Jido.AgentServer.call(pid, signal)
+    
+    assert agent.state.counter == 5
+  end
+
+  test "async signals are processed" do
+    {:ok, pid} = Jido.AgentServer.start_link(agent: CounterAgent.new())
+    
+    signal = Jido.Signal.new!("counter.increment", %{amount: 3})
+    :ok = Jido.AgentServer.cast(pid, signal)
+    
+    # Wait for async processing
+    Process.sleep(100)
+    
+    {:ok, state} = Jido.AgentServer.state(pid)
+    assert state.agent.state.counter == 3
+  end
+
+  test "completion detection" do
+    {:ok, pid} = Jido.AgentServer.start_link(agent: TaskAgent.new())
+    
+    signal = Jido.Signal.new!("task.execute", %{})
+    :ok = Jido.AgentServer.cast(pid, signal)
+    
+    # Use await helper
+    {:ok, result} = Jido.await(pid, 5_000)
+    assert result.status == :completed
+  end
+end
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Defining Agents" icon="robot" href="/guides/defining-agents">
+    Learn how to define agents that run in AgentServer
+  </Card>
+  <Card title="Sensors" icon="satellite-dish" href="/guides/sensors">
+    Feed external events into running agents
+  </Card>
+  <Card title="Debugging" icon="bug" href="/operations/debugging">
+    Systematic debugging workflow for agents
+  </Card>
+  <Card title="Persistence" icon="database" href="/operations/persistence">
+    Hibernate/thaw and InstanceManager lifecycle
+  </Card>
+</CardGroup>
+
+## Related
+
+- [Debugging](/operations/debugging) — Systematic debugging workflow
+- [Persistence & Storage](/operations/persistence) — Hibernate/thaw and InstanceManager lifecycle
+- [Worker Pools](/operations/worker-pools) — Pre-warmed agent pools for throughput
+- [Await & Coordination](/orchestration/coordination) — Waiting on agent completion

@@ -1,0 +1,147 @@
+---
+title: "StateOp"
+description: "State operations for modifying agent state within strategies"
+---
+
+## Overview
+
+State operations modify agent state within the strategy layer. They are separated from directives to maintain a clean boundary:
+
+- **State operations** → modify agent state within the strategy
+- **Directives** → external effects for the runtime to execute
+
+These operations never leave the strategy layer. They are processed by `Jido.Agent.StateOps` to update the agent's internal state.
+
+## Available Operations
+
+### SetState
+
+Deep merge attributes into the agent's state using `DeepMerge.deep_merge/2` semantics.
+
+<ParamField path="attrs" type="map" required>
+  Attributes to merge into agent state. Nested maps are merged recursively.
+</ParamField>
+
+```elixir
+alias Jido.Agent.StateOp
+
+{:ok, result, [
+  %StateOp.SetState{attrs: %{status: :processing, count: 42}}
+]}
+```
+
+### ReplaceState
+
+Replace the agent's state wholesale (no merge).
+
+<ParamField path="state" type="map" required>
+  Complete new state to replace existing state.
+</ParamField>
+
+**Use cases:**
+- Reset strategy state completely
+- Replace large blob structures
+- Ensure no stale keys remain from previous state
+
+```elixir
+{:ok, result, [
+  %StateOp.ReplaceState{state: %{status: :idle}}
+]}
+```
+
+### DeleteKeys
+
+Delete top-level keys from the agent's state.
+
+<ParamField path="keys" type="list(atom)" required>
+  Top-level keys to delete from state.
+</ParamField>
+
+**Use cases:**
+- Clear ephemeral/transient keys
+- Remove strategy-only keys after completion
+- Clean up temporary data without full state replacement
+
+```elixir
+{:ok, result, [
+  %StateOp.DeleteKeys{keys: [:temp, :cache]}
+]}
+```
+
+### SetPath
+
+Set a value at a nested path in the agent's state using `put_in/3` semantics.
+
+<ParamField path="path" type="list(atom)" required>
+  Path to the key as a list of atoms.
+</ParamField>
+
+<ParamField path="value" type="any" required>
+  Value to set at the path.
+</ParamField>
+
+```elixir
+{:ok, result, [
+  %StateOp.SetPath{path: [:config, :timeout], value: 5000}
+]}
+# Sets agent.state.config.timeout = 5000
+```
+
+### DeletePath
+
+Delete a value at a nested path in the agent's state using `pop_in/2` semantics.
+
+<ParamField path="path" type="list(atom)" required>
+  Path to delete as a list of atoms.
+</ParamField>
+
+```elixir
+{:ok, result, [
+  %StateOp.DeletePath{path: [:temp, :cache]}
+]}
+# Removes agent.state.temp.cache
+```
+
+## Helper Constructors
+
+Convenience functions for creating state operations:
+
+```elixir
+alias Jido.Agent.StateOp
+
+# Create operations using helpers
+StateOp.set_state(%{status: :working})
+StateOp.replace_state(%{status: :idle})
+StateOp.delete_keys([:temp, :cache])
+StateOp.set_path([:config, :timeout], 5000)
+StateOp.delete_path([:temp, :cache])
+```
+
+## Usage in Actions
+
+Actions can return state operations alongside directives:
+
+```elixir
+defmodule MyAction do
+  use Jido.Action,
+    name: "my_action",
+    schema: []
+
+  alias Jido.Agent.{Directive, StateOp}
+
+  def run(_params, _context) do
+    {:ok, %{processed: true}, [
+      %StateOp.SetState{attrs: %{status: :processing}},
+      %Directive.Emit{signal: my_signal}
+    ]}
+  end
+end
+```
+
+The strategy applies state operations to the agent and passes through directives to the runtime.
+
+## Type Definition
+
+```elixir
+@type t :: SetState.t() | ReplaceState.t() | DeleteKeys.t() | SetPath.t() | DeletePath.t()
+```

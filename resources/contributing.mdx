@@ -1,0 +1,367 @@
+---
+title: Contributing
+description: Learn how to contribute to Jido and help build the future of agent systems
+icon: 'code-pull-request'
+---
+
+Welcome to the Jido contributor's guide! We're excited that you're interested in contributing to Jido, our framework for building autonomous, distributed agent systems in Elixir.
+
+## Getting Started
+
+### Development Environment
+
+<Steps>
+  <Step title="Elixir Version Requirements">
+    Jido requires Elixir ~> 1.17. We recommend using [asdf](https://asdf-vm.com/) or similar version manager.
+  </Step>
+  
+  <Step title="Clone and Setup">
+    ```bash
+    # Clone the repository
+    git clone https://github.com/agentjido/jido.git
+    cd jido
+
+    # Install dependencies
+    mix deps.get
+
+    # Run tests to verify your setup
+    mix test
+    ```
+  </Step>
+  
+  <Step title="Quality Checks">
+    ```bash
+    # Run the full quality check suite
+    mix quality
+
+    # Or individual checks
+    mix format                        # Format code
+    mix compile --warnings-as-errors  # Check compilation
+    mix dialyzer                      # Type checking
+    mix credo --all                   # Static analysis
+    ```
+  </Step>
+</Steps>
+
+## Project Structure
+
+```
+.
+├── lib/
+│   ├── jido/
+│   │   ├── actions/     # Core action implementations
+│   │   ├── agents/      # Agent behaviors and implementations
+│   │   ├── sensors/     # Sensor system components
+│   │   ├── workflows/   # Workflow execution engines
+│   │   └── utils/       # Utility functions
+│   └── jido.ex          # Main entry point
+├── test/
+│   ├── jido/
+│   │   └── ...         # Tests mirroring lib structure
+│   ├── support/        # Test helpers and shared fixtures
+│   └── test_helper.exs
+├── guides/             # Documentation guides
+└── mix.exs
+```
+
+### Core Components
+
+<CardGroup cols={2}>
+  <Card title="Actions" icon="play">
+    Discrete, composable units of work
+  </Card>
+  <Card title="Workflows" icon="diagram-project">
+    Sequences of actions that accomplish larger goals
+  </Card>
+  <Card title="Agents" icon="robot">
+    Stateful entities that can plan and execute workflows
+  </Card>
+  <Card title="Sensors" icon="radar">
+    Real-time monitoring and data gathering components
+  </Card>
+</CardGroup>
+
+## Development Guidelines
+
+### Code Style
+
+<AccordionGroup>
+  <Accordion title="Formatting">
+    - Run `mix format` before committing
+    - Follow standard [Elixir style guide](https://hexdocs.pm/elixir/naming-conventions.html)
+    - Use `snake_case` for functions and variables
+    - Use `PascalCase` for module names
+  </Accordion>
+
+  <Accordion title="Documentation">
+    - Add `@moduledoc` to every module
+    - Document all public functions with `@doc`
+    - Include examples when helpful
+    - Keep guides up-to-date in the `guides/` directory
+    - Use doctests for simple examples
+
+    ```elixir
+    @doc """
+    Processes the input string.
+
+    ## Examples
+
+        iex> MyModule.process("hello")
+        {:ok, "HELLO"}
+    """
+    @spec process(String.t()) :: {:ok, String.t()}
+    def process(input) do
+      {:ok, String.upcase(input)}
+    end
+    ```
+  </Accordion>
+
+  <Accordion title="Type Specifications">
+    Always include type specifications for public functions:
+
+    ```elixir
+    @type validation_error :: :invalid_name | :invalid_status
+    
+    @spec process(String.t()) :: {:ok, term()} | {:error, validation_error()}
+    def process(input) do
+      # Implementation
+    end
+    ```
+  </Accordion>
+</AccordionGroup>
+
+### Testing
+
+<Tabs>
+  <Tab title="Test Organization">
+    ```elixir
+    defmodule Jido.Test.Actions.FormatUserTest do
+      use ExUnit.Case, async: true
+      
+      describe "run/2" do
+        test "formats user data correctly" do
+          # Test implementation
+        end
+        
+        test "handles invalid input" do
+          # Error case testing
+        end
+      end
+    end
+    ```
+  </Tab>
+
+  <Tab title="Coverage Requirements">
+    - Maintain high test coverage
+    - Test both success and error paths
+    - Include property-based tests for complex logic
+    - Test async behavior where applicable
+  </Tab>
+
+  <Tab title="Running Tests">
+    ```bash
+    # Run full test suite
+    mix test
+
+    # Run with coverage
+    mix test --cover
+
+    # Run specific test file
+    mix test test/jido/actions/format_user_test.exs
+
+    # Run tests with specific tag
+    mix test --only integration
+    ```
+  </Tab>
+</Tabs>
+
+### Error Handling
+
+<Warning>
+  Never intentionally raise exceptions. The Jido framework intentionally minimizes the use of exceptions.
+</Warning>
+
+**Use With Patterns:**
+
+```elixir
+def complex_operation(input) do
+  with {:ok, validated} <- validate(input),
+       {:ok, processed} <- process(validated) do
+    {:ok, processed}
+  end
+end
+```
+
+**Return Values:**
+- Use tagged tuples: `{:ok, result}` or `{:error, reason}`
+- Create specific error types for different failures
+- Avoid silent failures
+- Document error conditions
+
+## Git Hooks and Conventional Commits
+
+We use [git_hooks](https://hex.pm/packages/git_hooks) to enforce commit message conventions:
+
+```bash
+mix git_hooks.install
+```
+
+This installs a `commit-msg` hook that validates your commit messages follow the [Conventional Commits](https://www.conventionalcommits.org/) specification.
+
+### Commit Message Format
+
+```
+<type>[optional scope]: <description>
+
+[optional body]
+
+[optional footer(s)]
+```
+
+### Types
+
+| Type | Description |
+|------|-------------|
+| `feat` | A new feature |
+| `fix` | A bug fix |
+| `docs` | Documentation only changes |
+| `style` | Changes that don't affect code meaning |
+| `refactor` | Code change that neither fixes a bug nor adds a feature |
+| `perf` | Performance improvement |
+| `test` | Adding or correcting tests |
+| `chore` | Changes to build process or auxiliary tools |
+| `ci` | CI configuration changes |
+
+### Examples
+
+<CodeGroup>
+```bash Feature
+git commit -m "feat(agents): add distributed execution support"
+```
+
+```bash Bug Fix
+git commit -m "fix(workflows): resolve race condition in parallel execution"
+```
+
+```bash Breaking Change
+git commit -m "feat(api)!: change action return type"
+```
+
+```bash With Body
+git commit -m "feat(plugins): add memory plugin
+
+This commit introduces a new memory plugin that provides
+context retention across agent interactions."
+```
+</CodeGroup>
+
+<Note>
+  The hook will reject non-conforming commits, ensuring a clean changelog can be generated automatically.
+</Note>
+
+## Pull Request Process
+
+<Steps>
+  <Step title="Before Submitting">
+    - Run the full quality check suite: `mix quality`
+    - Ensure all tests pass
+    - Update documentation if needed
+    - Add tests for new functionality
+  </Step>
+
+  <Step title="PR Guidelines">
+    - Create a feature branch from `main`
+    - Use descriptive commit messages following conventional commits
+    - Reference any related issues
+    - Keep changes focused and atomic
+  </Step>
+
+  <Step title="Review Process">
+    - PRs require at least one review
+    - Address all review comments
+    - Maintain a clean commit history
+    - Update your branch if needed
+  </Step>
+</Steps>
+
+## Performance Considerations
+
+### Optimization
+
+<CardGroup cols={2}>
+  <Card title="Profile First" icon="chart-line">
+    Always profile before optimizing. Use tools like `:fprof` or `eprof`.
+  </Card>
+  <Card title="Document Performance" icon="file-lines">
+    Document performance characteristics and trade-offs.
+  </Card>
+  <Card title="Resource Usage" icon="server">
+    Consider resource usage in distributed environments.
+  </Card>
+  <Card title="Timeouts" icon="clock">
+    Implement appropriate timeouts for all operations.
+  </Card>
+</CardGroup>
+
+### Resource Management
+
+- Clean up resources properly
+- Handle large data sets efficiently
+- Consider memory usage in long-running processes
+- Use streaming for large data when possible
+
+## Release Process
+
+Releases are handled automatically by maintainers using `git_ops`. As a contributor:
+
+<Steps>
+  <Step title="Use Conventional Commits">
+    Your commit messages determine changelog entries:
+    - `feat:` commits create "Added" entries
+    - `fix:` commits create "Fixed" entries
+    - `docs:`, `chore:`, `ci:` commits are excluded
+  </Step>
+
+  <Step title="Do NOT Edit CHANGELOG.md">
+    The changelog is auto-generated during releases.
+  </Step>
+
+  <Step title="Update Documentation">
+    - Update guides if needed
+    - Check all docstrings
+    - Verify README is current
+  </Step>
+</Steps>
+
+## Additional Resources
+
+<CardGroup cols={3}>
+  <Card title="API Docs" icon="book" href="https://hexdocs.pm/jido">
+    Browse the complete API documentation
+  </Card>
+  <Card title="GitHub Issues" icon="github" href="https://github.com/agentjido/jido/issues">
+    Report bugs or request features
+  </Card>
+  <Card title="Discussions" icon="comments" href="https://github.com/agentjido/jido/discussions">
+    Ask questions and share ideas
+  </Card>
+</CardGroup>
+
+## Questions or Problems?
+
+If you have questions about contributing:
+
+<CardGroup cols={2}>
+  <Card title="Open a Discussion" icon="message-question" href="https://github.com/agentjido/jido/discussions">
+    Ask questions and get help from the community
+  </Card>
+  <Card title="Check Issues" icon="magnifying-glass" href="https://github.com/agentjido/jido/issues">
+    See if your question has already been answered
+  </Card>
+</CardGroup>
+
+---
+
+<Note>
+  Thank you for contributing to Jido! Your efforts help build better tools for autonomous agent systems.
+</Note>

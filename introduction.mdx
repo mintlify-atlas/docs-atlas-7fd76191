@@ -1,0 +1,184 @@
+---
+title: "Welcome to Jido"
+description: "Pure functional agents and OTP runtime for building autonomous multi-agent workflows in Elixir"
+---
+
+<Note>
+  Jido (自動) means "automatic" or "automated" in Japanese — where 自 (ji) means "self" and 動 (dō) means "movement"
+</Note>
+
+## What is Jido?
+
+Jido is a foundational framework for building autonomous, distributed agent systems in Elixir. It combines pure functional agent design with OTP's battle-tested concurrency primitives to give you deterministic, testable agents that run reliably in production.
+
+**Core Philosophy:**
+- Agents are immutable data structures
+- State changes are pure data transformations
+- Side effects are described as directives
+- Runtime executes directives separately from agent logic
+
+```elixir
+{agent, directives} = MyAgent.cmd(agent, action)
+```
+
+<CardGroup cols={2}>
+  <Card title="Pure Functional Design" icon="function">
+    Agents are immutable structs. The `cmd/2` operation is deterministic and testable without processes.
+  </Card>
+  <Card title="OTP Runtime" icon="server">
+    GenServer-based AgentServer executes directives, manages lifecycle, and handles signals in production.
+  </Card>
+  <Card title="Composable Plugins" icon="puzzle-piece">
+    Extend agents with reusable capability bundles that encapsulate actions, state, and signal routes.
+  </Card>
+  <Card title="Multi-Agent Orchestration" icon="sitemap">
+    Build complex workflows with parent-child hierarchies, coordination primitives, and distributed execution.
+  </Card>
+</CardGroup>
+
+## Quick Example
+
+Build a simple counter agent in minutes:
+
+<CodeGroup>
+
+```elixir Agent Definition
+defmodule CounterAgent do
+  use Jido.Agent,
+    name: "counter",
+    description: "A simple counter agent",
+    schema: [
+      count: [type: :integer, default: 0]
+    ],
+    signal_routes: [
+      {"increment", IncrementAction}
+    ]
+end
+```
+
+```elixir Action
+defmodule IncrementAction do
+  use Jido.Action,
+    name: "increment",
+    description: "Increments the counter",
+    schema: [
+      amount: [type: :integer, default: 1]
+    ]
+
+  def run(params, context) do
+    current = context.state[:count] || 0
+    {:ok, %{count: current + params.amount}}
+  end
+end
+```
+
+```elixir Usage
+# Pure function usage (testable)
+agent = CounterAgent.new()
+{agent, directives} = CounterAgent.cmd(agent, {IncrementAction, %{amount: 5}})
+
+agent.state.count  # => 5
+
+# Runtime usage (production)
+{:ok, pid} = MyApp.Jido.start_agent(CounterAgent, id: "counter-1")
+{:ok, agent} = Jido.AgentServer.call(pid, Jido.Signal.new!("increment", %{amount: 10}))
+```
+
+</CodeGroup>
+
+## Key Features
+
+<CardGroup cols={3}>
+  <Card title="Directive-Based Effects" icon="bolt">
+    Separate logic from side effects with typed directive descriptors
+  </Card>
+  <Card title="Execution Strategies" icon="gears">
+    Choose from Direct, FSM, or custom execution patterns
+  </Card>
+  <Card title="Signal Routing" icon="route">
+    CloudEvents-based messaging with configurable routing
+  </Card>
+  <Card title="Cron Scheduling" icon="clock">
+    Declarative scheduling with SchedEx integration
+  </Card>
+  <Card title="Worker Pools" icon="users">
+    Pre-warmed agent pools for high-throughput scenarios
+  </Card>
+  <Card title="Persistence" icon="database">
+    Hibernate and thaw agents with ETS or file storage
+  </Card>
+  <Card title="Observability" icon="chart-line">
+    Built-in telemetry, tracing, and debug tools
+  </Card>
+  <Card title="Schema Validation" icon="shield-check">
+    NimbleOptions and Zoi validation at agent and plugin boundaries
+  </Card>
+  <Card title="Testing Support" icon="vial">
+    Pure agents test without processes; runtime helpers for integration tests
+  </Card>
+</CardGroup>
+
+## The Jido Ecosystem
+
+Jido is part of a modular ecosystem of packages:
+
+<CardGroup cols={2}>
+  <Card title="jido" icon="cube" href="https://hex.pm/packages/jido">
+    Core agent framework with state management, directives, and runtime
+  </Card>
+  <Card title="jido_action" icon="play" href="https://hex.pm/packages/jido_action">
+    Composable, validated actions with AI tool integration
+  </Card>
+  <Card title="jido_signal" icon="signal" href="https://hex.pm/packages/jido_signal">
+    CloudEvents-based message envelope and pub/sub utilities
+  </Card>
+  <Card title="jido_ai" icon="brain" href="https://hex.pm/packages/jido_ai">
+    AI/LLM integration for intelligent agents
+  </Card>
+  <Card title="req_llm" icon="message-bot" href="https://github.com/agentjido/req_llm">
+    HTTP client for LLM APIs with streaming support
+  </Card>
+</CardGroup>
+
+## Why Jido?
+
+OTP primitives are excellent, but building multi-agent systems requires patterns that Jido formalizes:
+
+| Raw OTP | Jido Formalizes |
+|---------|-----------------|
+| Ad-hoc message shapes per GenServer | Signals as standard envelope |
+| Business logic mixed in callbacks | Actions as reusable command pattern |
+| Implicit effects scattered in code | Directives as typed effect descriptions |
+| Custom child tracking per server | Built-in parent/child hierarchy |
+| Process exit = completion | State-based completion semantics |
+
+## Getting Started
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Build your first agent in 5 minutes
+  </Card>
+  <Card title="Installation" icon="download" href="/installation">
+    Add Jido to your Elixir project
+  </Card>
+  <Card title="Core Concepts" icon="book" href="/core-concepts">
+    Understand the mental model
+  </Card>
+  <Card title="API Reference" icon="code" href="/api/jido">
+    Explore the complete API
+  </Card>
+</CardGroup>
+
+## Community & Support
+
+<CardGroup cols={3}>
+  <Card title="GitHub" icon="github" href="https://github.com/agentjido/jido">
+    Star the repo and report issues
+  </Card>
+  <Card title="Discord" icon="discord" href="https://agentjido.xyz/discord">
+    Join the community discussion
+  </Card>
+  <Card title="Website" icon="globe" href="https://agentjido.xyz">
+    Demos, examples, and workbench
+  </Card>
+</CardGroup>

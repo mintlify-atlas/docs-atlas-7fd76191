@@ -1,0 +1,136 @@
+---
+title: Ecosystem
+description: Explore the Jido ecosystem packages and extensions
+icon: 'puzzle-piece'
+---
+
+Jido is the core package of a larger ecosystem built around the Jido Agent behavior. The ecosystem offers several opt-in packages to extend the core functionality.
+
+## Core Packages
+
+The Jido ecosystem is designed as a modular system where each package provides specific capabilities:
+
+<CardGroup cols={2}>
+  <Card title="req_llm" icon="brain" href="https://github.com/agentjido/req_llm">
+    HTTP client for LLM APIs
+  </Card>
+  <Card title="jido_action" icon="play" href="https://github.com/agentjido/jido_action">
+    Composable, validated actions with AI tool integration
+  </Card>
+  <Card title="jido_signal" icon="signal" href="https://github.com/agentjido/jido_signal">
+    CloudEvents-based message envelope and utilities for routing and pub/sub
+  </Card>
+  <Card title="jido" icon="robot" href="https://github.com/agentjido/jido">
+    Core agent framework with state management, directives, and runtime
+  </Card>
+  <Card title="jido_ai" icon="sparkles" href="https://github.com/agentjido/jido_ai">
+    AI/LLM integration for agents
+  </Card>
+</CardGroup>
+
+## Package Details
+
+### req_llm
+
+HTTP client specifically designed for interacting with LLM APIs. Provides a consistent interface for different LLM providers.
+
+**Key Features:**
+- Unified API for multiple LLM providers
+- Request/response handling
+- Streaming support
+- Error handling and retries
+
+**GitHub:** [agentjido/req_llm](https://github.com/agentjido/req_llm)
+
+### jido_action
+
+Composable action system with schema validation and AI tool integration. Actions are discrete units of work that can be validated, composed, and exposed as AI tools.
+
+**Key Features:**
+- Schema-based parameter validation
+- AI tool protocol support
+- Composable action chains
+- Type-safe execution context
+
+**GitHub:** [agentjido/jido_action](https://github.com/agentjido/jido_action)
+
+### jido_signal
+
+CloudEvents-compliant message envelope system with routing and pub/sub capabilities. Provides standardized message formats for agent communication.
+
+**Key Features:**
+- CloudEvents specification compliance
+- Signal routing and filtering
+- Pub/sub messaging patterns
+- Type-safe signal construction
+
+**GitHub:** [agentjido/jido_signal](https://github.com/agentjido/jido_signal)
+
+### jido (Core)
+
+The core agent framework providing:
+- Immutable agent architecture
+- Directive-based effects
+- OTP runtime integration
+- Plugin system
+- Execution strategies
+
+**Key Features:**
+- Pure functional agent design
+- State management with validation
+- Parent-child agent hierarchies
+- Multi-agent orchestration
+- Persistence and lifecycle management
+
+**GitHub:** [agentjido/jido](https://github.com/agentjido/jido)
+
+### jido_ai
+
+AI and LLM integration for Jido agents. Enables agents to leverage large language models for decision-making and task execution.
+
+**Key Features:**
+- LLM provider integrations
+- Prompt management
+- Context handling
+- AI-powered agent behaviors
+
+**GitHub:** [agentjido/jido_ai](https://github.com/agentjido/jido_ai)
+
+## Demos and Examples
+
+For demonstrations and examples of what you can build with the Jido ecosystem, visit:
+
+<Card title="AgentJido Website" icon="globe" href="https://agentjido.xyz">
+  Explore demos, examples, and use cases
+</Card>
+
+## Community Resources
+
+<CardGroup cols={2}>
+  <Card title="Jido Workbench" icon="flask" href="https://github.com/agentjido/jido_workbench">
+    Development and testing environment for Jido agents
+  </Card>
+  <Card title="GitHub Organization" icon="github" href="https://github.com/agentjido">
+    Browse all ecosystem packages and contribute
+  </Card>
+</CardGroup>
+
+## Installation
+
+Each package can be installed independently via Hex:
+
+```elixir mix.exs
+def deps do
+  [
+    {:jido, "~> 2.0"},
+    {:jido_action, "~> 2.0"},
+    {:jido_signal, "~> 2.0"},
+    {:jido_ai, "~> 2.0"},
+    {:req_llm, "~> 0.1"}
+  ]
+end
+```
+
+<Note>
+  Most applications will only need the core `jido` package. Add additional packages as needed for your specific use case.
+</Note>

@@ -1,0 +1,212 @@
+---
+title: "Actions.Scheduling"
+description: "Signal scheduling and timing actions"
+---
+
+## Overview
+
+Base actions for scheduling delayed signals and timeouts. These actions wrap the `Schedule` directive for common timing patterns.
+
+## Actions
+
+### ScheduleSignal
+
+Schedule a signal to be delivered after a delay. The signal will be delivered to the agent's own mailbox after the specified delay.
+
+<ParamField path="delay_ms" type="non_neg_integer" required>
+  Delay in milliseconds.
+</ParamField>
+
+<ParamField path="signal_type" type="string" required>
+  Signal type to schedule.
+</ParamField>
+
+<ParamField path="payload" type="map" default="%{}">
+  Signal payload data.
+</ParamField>
+
+<ParamField path="source" type="string" default="/scheduler">
+  Signal source path.
+</ParamField>
+
+```elixir
+# Schedule a completion check
+{Jido.Actions.Scheduling.ScheduleSignal, %{
+  delay_ms: 5000,
+  signal_type: "work.check",
+  payload: %{attempt: 1}
+}}
+```
+
+### ScheduleTimeout
+
+Schedule a timeout signal for deadline handling. Convenience wrapper that schedules a standard timeout signal that can be handled to fail the agent or take corrective action.
+
+<ParamField path="timeout_ms" type="non_neg_integer" required>
+  Timeout duration in milliseconds.
+</ParamField>
+
+<ParamField path="timeout_id" type="any" default=":default">
+  Identifier for this timeout.
+</ParamField>
+
+<ParamField path="signal_type" type="string" default="agent.timeout">
+  Signal type for timeout.
+</ParamField>
+
+```elixir
+# Set a 30 second deadline
+{Jido.Actions.Scheduling.ScheduleTimeout, %{
+  timeout_ms: 30_000,
+  timeout_id: :work_deadline
+}}
+```
+
+### ScheduleCron
+
+Schedule a recurring signal using cron expression. The signal will be delivered on the cron schedule until cancelled.
+
+<ParamField path="cron" type="string" required>
+  Cron expression (e.g., "*/5 * * * *" for every 5 minutes).
+</ParamField>
+
+<ParamField path="job_id" type="any">
+  Identifier for this job (for cancellation).
+</ParamField>
+
+<ParamField path="signal_type" type="string" required>
+  Signal type to schedule.
+</ParamField>
+
+<ParamField path="payload" type="map" default="%{}">
+  Signal payload data.
+</ParamField>
+
+<ParamField path="timezone" type="string">
+  Timezone for cron evaluation.
+</ParamField>
+
+```elixir
+# Heartbeat every minute
+{Jido.Actions.Scheduling.ScheduleCron, %{
+  cron: "* * * * *",
+  job_id: :heartbeat,
+  signal_type: "agent.heartbeat"
+}}
+
+# Daily cleanup at 9am Eastern
+{Jido.Actions.Scheduling.ScheduleCron, %{
+  cron: "0 9 * * *",
+  job_id: :daily_cleanup,
+  signal_type: "maintenance.cleanup",
+  timezone: "America/New_York"
+}}
+```
+
+### CancelCron
+
+Cancel a scheduled cron job by its ID.
+
+<ParamField path="job_id" type="any" required>
+  Identifier of the job to cancel.
+</ParamField>
+
+```elixir
+{Jido.Actions.Scheduling.CancelCron, %{job_id: :heartbeat}}
+```
+
+## Usage Example
+
+```elixir
+defmodule TimedWorker do
+  use Jido.Agent,
+    name: "timed_worker",
+    signal_routes: [
+      {"work.start", StartWorkAction},
+      {"work.timeout", Jido.Actions.Status.MarkFailed},
+      {"work.check", CheckProgressAction},
+      {"maintenance.cleanup", CleanupAction}
+    ]
+end
+
+defmodule StartWorkAction do
+  use Jido.Action,
+    name: "start_work",
+    schema: [timeout_ms: [type: :integer, default: 30_000]]
+
+  def run(%{timeout_ms: timeout}, _context) do
+    {:ok, %{status: :working, started_at: DateTime.utc_now()}, [
+      # Set a timeout
+      Jido.Agent.Directive.schedule(
+        timeout,
+        Jido.Signal.new!("work.timeout", %{}, source: "/timeout")
+      ),
+      # Schedule periodic checks
+      Jido.Agent.Directive.schedule(
+        5000,
+        Jido.Signal.new!("work.check", %{}, source: "/scheduler")
+      )
+    ]}
+  end
+end
+
+defmodule CheckProgressAction do
+  use Jido.Action,
+    name: "check_progress",
+    schema: []
+
+  def run(_params, context) do
+    if work_complete?(context.agent.state) do
+      {:ok, %{status: :completed}}
+    else
+      # Reschedule next check
+      {:ok, %{}, [
+        Jido.Agent.Directive.schedule(
+          5000,
+          Jido.Signal.new!("work.check", %{}, source: "/scheduler")
+        )
+      ]}
+    end
+  end
+
+  defp work_complete?(state), do: state.status == :completed
+end
+
+defmodule MaintenanceAgent do
+  use Jido.Agent,
+    name: "maintenance",
+    signal_routes: [
+      {"start", SetupMaintenanceAction},
+      {"maintenance.cleanup", CleanupAction},
+      {"stop", StopMaintenanceAction}
+    ]
+end
+
+defmodule SetupMaintenanceAction do
+  use Jido.Action,
+    name: "setup_maintenance",
+    schema: []
+
+  def run(_params, _context) do
+    {:ok, %{}, [
+      Jido.Agent.Directive.cron(
+        "0 2 * * *",  # 2am daily
+        Jido.Signal.new!("maintenance.cleanup", %{}, source: "/cron"),
+        job_id: :daily_cleanup
+      )
+    ]}
+  end
+end
+
+defmodule StopMaintenanceAction do
+  use Jido.Action,
+    name: "stop_maintenance",
+    schema: []
+
+  def run(_params, _context) do
+    {:ok, %{}, [
+      Jido.Agent.Directive.cron_cancel(:daily_cleanup)
+    ]}
+  end
+end
+```

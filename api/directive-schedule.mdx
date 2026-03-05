@@ -1,0 +1,447 @@
+---
+title: "Schedule Directive"
+description: "Schedule delayed messages and recurring jobs"
+---
+
+## Overview
+
+Jido provides two scheduling directives:
+
+- **Schedule** - Schedule a one-time delayed message
+- **Cron** - Schedule recurring jobs using cron expressions
+
+## Schedule Directive
+
+Schedule a delayed message to the agent. The runtime will send the message back to the agent after the delay.
+
+### Struct Fields
+
+<ParamField path="delay_ms" type="non_neg_integer()" required>
+  Delay in milliseconds (must be >= 0).
+</ParamField>
+
+<ParamField path="message" type="term()" required>
+  Message to send after delay. Can be any term that your agent's `cmd/2` can handle.
+</ParamField>
+
+### Usage Examples
+
+#### Basic Timeout
+
+```elixir
+alias Jido.Agent.Directive
+
+# Schedule a timeout
+%Directive.Schedule{
+  delay_ms: 5000,
+  message: :timeout
+}
+
+# Using helper function
+Directive.schedule(5000, :timeout)
+```
+
+#### Delayed Check
+
+```elixir
+def cmd(agent, :start_task, _ctx) do
+  ref = make_ref()
+  
+  new_state = Map.put(agent.state, :task_ref, ref)
+  agent = %{agent | state: new_state}
+  
+  directives = [
+    # Start processing...
+    Directive.schedule(1000, {:check, ref})
+  ]
+  
+  {agent, directives}
+end
+
+def cmd(agent, {:check, ref}, _ctx) do
+  case agent.state.task_ref do
+    ^ref ->
+      # Check task status
+      if task_complete?(agent.state) do
+        {agent, []}
+      else
+        # Reschedule check
+        {agent, [Directive.schedule(1000, {:check, ref})]}
+      end
+    
+    _ ->
+      # Task was cancelled
+      {agent, []}
+  end
+end
+```
+
+#### Retry Pattern
+
+```elixir
+def cmd(agent, :process_with_retry, ctx) do
+  case process_item(agent.state) do
+    {:ok, result} ->
+      new_state = Map.put(agent.state, :result, result)
+      {%{agent | state: new_state}, []}
+    
+    {:error, _reason} ->
+      retry_count = Map.get(agent.state, :retry_count, 0)
+      
+      if retry_count < 3 do
+        new_state = Map.put(agent.state, :retry_count, retry_count + 1)
+        agent = %{agent | state: new_state}
+        
+        # Exponential backoff
+        delay = :math.pow(2, retry_count) * 1000 |> round()
+        
+        directives = [
+          Directive.schedule(delay, :process_with_retry)
+        ]
+        
+        {agent, directives}
+      else
+        # Max retries reached
+        {agent, []}
+      end
+  end
+end
+```
+
+### Helper Function
+
+```elixir
+@spec schedule(non_neg_integer(), term()) :: Schedule.t()
+```
+
+```elixir
+Directive.schedule(5000, :timeout)
+Directive.schedule(1000, {:check, ref})
+Directive.schedule(0, :immediate)  # Schedules for next message loop
+```
+
+## Cron Directive
+
+Register or update a recurring cron job for this agent. The job is owned by the agent's `id` and identified within that agent by `job_id`.
+
+On each tick, the scheduler sends `message` (or `signal`) back to the agent via `Jido.AgentServer.cast/2`.
+
+### Struct Fields
+
+<ParamField path="job_id" type="term()">
+  Logical id within the agent (for upsert/cancel). Auto-generated if nil.
+</ParamField>
+
+<ParamField path="cron" type="String.t()" required>
+  Cron expression string. Supports:
+  - Standard cron: `"* * * * *"` (minute hour day month weekday)
+  - Extended: `"*/5 * * * *"` (every 5 minutes)
+  - Shortcuts: `"@hourly"`, `"@daily"`, `"@weekly"`, `"@monthly"`, `"@yearly"`
+</ParamField>
+
+<ParamField path="message" type="term()" required>
+  Signal or message to send on each tick. Can be:
+  - A `Jido.Signal.t()` struct
+  - Any term (will be wrapped in a `jido.agent.cron.tick` signal)
+</ParamField>
+
+<ParamField path="timezone" type="String.t()">
+  Optional timezone identifier (e.g., `"America/New_York"`). Defaults to UTC.
+</ParamField>
+
+### Usage Examples
+
+#### Every Minute Heartbeat
+
+```elixir
+alias Jido.Agent.Directive
+
+# Every minute, send a tick signal
+tick_signal = Signal.new!("heartbeat", %{}, source: "/agent/#{agent.id}")
+
+%Directive.Cron{
+  cron: "* * * * *",
+  message: tick_signal,
+  job_id: :heartbeat
+}
+
+# Using helper function
+Directive.cron("* * * * *", tick_signal, job_id: :heartbeat)
+```
+
+#### Daily Cleanup
+
+```elixir
+# Daily at midnight UTC
+cleanup_signal = Signal.new!("cleanup", %{}, source: "/agent/#{agent.id}")
+
+Directive.cron("@daily", cleanup_signal, job_id: :daily_cleanup)
+```
+
+#### Every 5 Minutes with Timezone
+
+```elixir
+# Every 5 minutes in New York timezone
+check_signal = Signal.new!("check", %{}, source: "/agent/#{agent.id}")
+
+Directive.cron(
+  "*/5 * * * *",
+  check_signal,
+  job_id: :check,
+  timezone: "America/New_York"
+)
+```
+
+#### Using Message Instead of Signal
+
+```elixir
+# Simple atom message (will be wrapped in cron tick signal)
+Directive.cron("* * * * *", :tick, job_id: :heartbeat)
+
+# Tuple message
+Directive.cron("@hourly", {:refresh, :cache}, job_id: :cache_refresh)
+```
+
+### Handling Cron Ticks
+
+```elixir
+defmodule MonitorAgent do
+  use Jido.Agent, name: "monitor"
+  
+  def signal_routes(_ctx) do
+    [
+      {"start.monitoring", :start_monitoring},
+      {"jido.agent.cron.tick", :handle_tick},
+      {"heartbeat", :handle_heartbeat}
+    ]
+  end
+  
+  def cmd(agent, :start_monitoring, _ctx) do
+    # Start heartbeat cron
+    directives = [
+      Directive.cron("* * * * *", :tick, job_id: :heartbeat)
+    ]
+    {agent, directives}
+  end
+  
+  def cmd(agent, :handle_tick, ctx) do
+    # Handle cron tick (if using simple message)
+    %{job_id: job_id, message: message} = ctx.signal.data
+    IO.puts("Tick from job #{job_id}: #{inspect(message)}")
+    
+    # Perform monitoring check
+    {agent, []}
+  end
+  
+  def cmd(agent, :handle_heartbeat, _ctx) do
+    # Handle heartbeat (if using Signal)
+    IO.puts("Heartbeat received")
+    {agent, []}
+  end
+end
+```
+
+### Updating a Cron Job
+
+Calling `Cron` with the same `job_id` updates the existing job:
+
+```elixir
+def cmd(agent, :update_schedule, _ctx) do
+  # Change from every minute to every 5 minutes
+  directives = [
+    Directive.cron("*/5 * * * *", :tick, job_id: :heartbeat)
+  ]
+  {agent, directives}
+end
+```
+
+### Helper Function
+
+```elixir
+@spec cron(term(), term(), keyword()) :: Cron.t()
+```
+
+```elixir
+Directive.cron("* * * * *", tick_signal)
+Directive.cron("@daily", cleanup_signal, job_id: :daily_cleanup)
+Directive.cron(
+  "0 9 * * MON",
+  weekly_signal,
+  job_id: :monday_9am,
+  timezone: "America/New_York"
+)
+```
+
+## CronCancel Directive
+
+Cancel a previously registered cron job by `job_id`.
+
+### Struct Fields
+
+<ParamField path="job_id" type="term()" required>
+  The logical job id to cancel (must match the `job_id` used in `Cron`).
+</ParamField>
+
+### Usage Examples
+
+```elixir
+alias Jido.Agent.Directive
+
+# Cancel a job
+%Directive.CronCancel{job_id: :heartbeat}
+
+# Using helper function
+Directive.cron_cancel(:heartbeat)
+```
+
+### Complete Lifecycle Example
+
+```elixir
+defmodule MonitorAgent do
+  use Jido.Agent, name: "monitor"
+  
+  def signal_routes(_ctx) do
+    [
+      {"start.monitoring", :start},
+      {"stop.monitoring", :stop},
+      {"jido.agent.cron.tick", :tick}
+    ]
+  end
+  
+  def cmd(agent, :start, _ctx) do
+    directives = [
+      Directive.cron("* * * * *", :check, job_id: :monitor)
+    ]
+    
+    new_state = Map.put(agent.state, :monitoring, true)
+    {%{agent | state: new_state}, directives}
+  end
+  
+  def cmd(agent, :stop, _ctx) do
+    directives = [
+      Directive.cron_cancel(:monitor)
+    ]
+    
+    new_state = Map.put(agent.state, :monitoring, false)
+    {%{agent | state: new_state}, directives}
+  end
+  
+  def cmd(agent, :tick, ctx) do
+    %{message: message} = ctx.signal.data
+    
+    if agent.state.monitoring do
+      # Perform check
+      IO.puts("Monitoring check: #{inspect(message)}")
+    end
+    
+    {agent, []}
+  end
+end
+```
+
+### Helper Function
+
+```elixir
+@spec cron_cancel(term()) :: CronCancel.t()
+```
+
+```elixir
+Directive.cron_cancel(:heartbeat)
+Directive.cron_cancel(:daily_cleanup)
+```
+
+## Cron Expression Format
+
+### Standard Format
+
+```
+* * * * *
+│ │ │ │ │
+│ │ │ │ └─ Weekday (0-7, 0 and 7 are Sunday)
+│ │ │ └─── Month (1-12)
+│ │ └───── Day of month (1-31)
+│ └─────── Hour (0-23)
+└───────── Minute (0-59)
+```
+
+### Special Characters
+
+- `*` - Any value
+- `,` - Value list (e.g., `1,3,5`)
+- `-` - Range (e.g., `1-5`)
+- `/` - Step (e.g., `*/5` = every 5)
+
+### Shortcuts
+
+- `@yearly` or `@annually` - Once a year (`0 0 1 1 *`)
+- `@monthly` - Once a month (`0 0 1 * *`)
+- `@weekly` - Once a week (`0 0 * * 0`)
+- `@daily` or `@midnight` - Once a day (`0 0 * * *`)
+- `@hourly` - Once an hour (`0 * * * *`)
+
+### Examples
+
+```elixir
+# Every minute
+"* * * * *"
+
+# Every 5 minutes
+"*/5 * * * *"
+
+# Every hour at 30 minutes past
+"30 * * * *"
+
+# Every day at 2:30 AM
+"30 2 * * *"
+
+# Every Monday at 9 AM
+"0 9 * * 1"
+
+# Every weekday at 6 PM
+"0 18 * * 1-5"
+
+# First day of every month at midnight
+"0 0 1 * *"
+```
+
+## Schemas
+
+### Schedule
+
+```elixir
+@schema Zoi.struct(
+  Jido.Agent.Directive.Schedule,
+  %{
+    delay_ms: Zoi.integer(description: "Delay in milliseconds") |> Zoi.min(0),
+    message: Zoi.any(description: "Message to send after delay")
+  },
+  coerce: true
+)
+```
+
+### Cron
+
+```elixir
+@schema Zoi.struct(
+  Jido.Agent.Directive.Cron,
+  %{
+    job_id: Zoi.any(description: "Logical cron job id within the agent") |> Zoi.optional(),
+    cron: Zoi.any(description: "Cron expression (e.g. \"* * * * *\", \"@daily\")"),
+    message: Zoi.any(description: "Signal or message to send on each tick"),
+    timezone: Zoi.any(description: "Timezone identifier (optional)") |> Zoi.optional()
+  },
+  coerce: true
+)
+```
+
+### CronCancel
+
+```elixir
+@schema Zoi.struct(
+  Jido.Agent.Directive.CronCancel,
+  %{
+    job_id: Zoi.any(description: "Logical cron job id within the agent")
+  },
+  coerce: true
+)
+```

@@ -1,0 +1,557 @@
+---
+title: "Jido.Agent"
+description: "Pure functional agent definition with immutable state"
+---
+
+# Jido.Agent
+
+An Agent is an immutable data structure that holds state and can be updated via commands. This module provides a minimal, purely functional API.
+
+## Core Pattern
+
+The fundamental operation is `cmd/2`:
+
+```elixir
+{agent, directives} = MyAgent.cmd(agent, MyAction)
+{agent, directives} = MyAgent.cmd(agent, {MyAction, %{value: 42}})
+{agent, directives} = MyAgent.cmd(agent, [Action1, Action2])
+```
+
+**Key invariants:**
+
+- The returned `agent` is **always complete** — no "apply directives" step needed
+- `directives` are **external effects only** — they never modify agent state
+- `cmd/2` is a **pure function** — given same inputs, always same outputs
+
+## Defining an Agent
+
+### `use Jido.Agent`
+
+Creates an agent module with compile-time validation and generated functions.
+
+<ParamField path="name" type="String.t()" required>
+  The name of the Agent. Must contain only letters, numbers, and underscores
+</ParamField>
+
+<ParamField path="description" type="String.t()">
+  A description of what the Agent does
+</ParamField>
+
+<ParamField path="category" type="String.t()">
+  The category of the Agent
+</ParamField>
+
+<ParamField path="tags" type="[String.t()]">
+  Tags for categorization. Default: `[]`
+</ParamField>
+
+<ParamField path="vsn" type="String.t()">
+  Version string
+</ParamField>
+
+<ParamField path="schema" type="keyword() | Zoi.schema()">
+  NimbleOptions or Zoi schema for validating the Agent's state. Default: `[]`
+</ParamField>
+
+<ParamField path="strategy" type="module() | {module(), keyword()}">
+  Execution strategy module or `{module, opts}`. Default: `Jido.Agent.Strategy.Direct`
+</ParamField>
+
+<ParamField path="plugins" type="[module() | {module(), map()}]">
+  Plugin modules or `{module, config}` tuples. Default: `[]`
+</ParamField>
+
+<ParamField path="signal_routes" type="list()">
+  Compile-time signal route table. Default: `[]`
+</ParamField>
+
+<ParamField path="default_plugins" type="false | map()">
+  Override default plugins. `false` to disable all, or map of overrides
+</ParamField>
+
+<ParamField path="schedules" type="list()">
+  Declarative cron schedules. Default: `[]`
+</ParamField>
+
+<ParamField path="jido" type="atom()">
+  Jido instance module for resolving default plugins at compile time
+</ParamField>
+
+**Example:**
+
+```elixir
+defmodule MyAgent do
+  use Jido.Agent,
+    name: "my_agent",
+    description: "My custom agent",
+    schema: [
+      status: [type: :atom, default: :idle],
+      counter: [type: :integer, default: 0]
+    ],
+    plugins: [MyPlugin]
+end
+```
+
+## Agent Functions
+
+When you `use Jido.Agent`, the following functions are automatically generated:
+
+### `new/1`
+
+Creates a new agent with optional initial state.
+
+<ParamField path="opts" type="keyword() | map()">
+  Options including `:id` and `:state`
+</ParamField>
+
+<ResponseField name="return" type="Jido.Agent.t()">
+  A new agent struct with initialized state
+</ResponseField>
+
+**Example:**
+
+```elixir
+agent = MyAgent.new()
+agent = MyAgent.new(id: "custom-id")
+agent = MyAgent.new(state: %{counter: 10})
+```
+
+### `cmd/2`
+
+Execute actions against the agent.
+
+<ParamField path="agent" type="Jido.Agent.t()" required>
+  The agent to execute actions on
+</ParamField>
+
+<ParamField path="action" type="module() | {module(), map()} | [action()]" required>
+  Action module, `{module, params}`, or list of actions
+</ParamField>
+
+<ResponseField name="return" type="{Jido.Agent.t(), [directive()]}">
+  Updated agent and list of directives to execute
+</ResponseField>
+
+**Action Formats:**
+
+- `MyAction` - Action module with no params
+- `{MyAction, %{param: 1}}` - Action with params
+- `{MyAction, %{param: 1}, %{context: data}}` - Action with params and context
+- `{MyAction, %{param: 1}, %{}, [timeout: 1000]}` - Action with opts
+- `%Instruction{}` - Full instruction struct
+- `[...]` - List of any of the above
+
+**Example:**
+
+```elixir
+{agent, directives} = MyAgent.cmd(agent, MyAction)
+{agent, directives} = MyAgent.cmd(agent, {MyAction, %{value: 42}})
+{agent, directives} = MyAgent.cmd(agent, [Action1, Action2])
+```
+
+### `cmd/3`
+
+Execute actions with per-call options.
+
+<ParamField path="agent" type="Jido.Agent.t()" required>
+  The agent to execute actions on
+</ParamField>
+
+<ParamField path="action" type="action()" required>
+  Action to execute
+</ParamField>
+
+<ParamField path="opts" type="keyword()" required>
+  Options merged into all instructions (`:timeout`, `:max_retries`, `:backoff`)
+</ParamField>
+
+**Example:**
+
+```elixir
+{agent, directives} = MyAgent.cmd(agent, MyAction, timeout: 5000)
+```
+
+### `set/2`
+
+Updates the agent's state by merging new attributes.
+
+<ParamField path="agent" type="Jido.Agent.t()" required>
+  The agent to update
+</ParamField>
+
+<ParamField path="attrs" type="map() | keyword()" required>
+  Attributes to merge into state
+</ParamField>
+
+<ResponseField name="return" type="{:ok, Jido.Agent.t()} | {:error, term()}">
+  Updated agent or error
+</ResponseField>
+
+**Example:**
+
+```elixir
+{:ok, agent} = MyAgent.set(agent, %{status: :running})
+{:ok, agent} = MyAgent.set(agent, counter: 5)
+```
+
+### `validate/2`
+
+Validates the agent's state against its schema.
+
+<ParamField path="agent" type="Jido.Agent.t()" required>
+  The agent to validate
+</ParamField>
+
+<ParamField path="opts" type="keyword()">
+  Options including `:strict` (default: `false`)
+</ParamField>
+
+<ResponseField name="return" type="{:ok, Jido.Agent.t()} | {:error, term()}">
+  Validated agent or error
+</ResponseField>
+
+**Example:**
+
+```elixir
+{:ok, agent} = MyAgent.validate(agent)
+{:ok, agent} = MyAgent.validate(agent, strict: true)
+```
+
+### `strategy_snapshot/1`
+
+Returns a stable, public view of the strategy's execution state.
+
+<ParamField path="agent" type="Jido.Agent.t()" required>
+  The agent to get snapshot from
+</ParamField>
+
+<ResponseField name="return" type="Jido.Agent.Strategy.Snapshot.t()">
+  Strategy snapshot with `:status`, `:done?`, `:result`, `:details`
+</ResponseField>
+
+**Example:**
+
+```elixir
+snapshot = MyAgent.strategy_snapshot(agent)
+if snapshot.done? do
+  IO.inspect(snapshot.result)
+end
+```
+
+## Metadata Functions
+
+### `name/0`
+
+Returns the agent's name.
+
+<ResponseField name="return" type="String.t()">
+  Agent name
+</ResponseField>
+
+### `description/0`
+
+Returns the agent's description.
+
+<ResponseField name="return" type="String.t() | nil">
+  Agent description or nil
+</ResponseField>
+
+### `category/0`
+
+Returns the agent's category.
+
+### `tags/0`
+
+Returns the agent's tags.
+
+<ResponseField name="return" type="[String.t()]">
+  List of tags
+</ResponseField>
+
+### `vsn/0`
+
+Returns the agent's version.
+
+### `schema/0`
+
+Returns the merged schema (base + plugin schemas).
+
+<ResponseField name="return" type="Zoi.schema() | keyword()">
+  The agent's state schema
+</ResponseField>
+
+## Plugin Functions
+
+### `plugins/0`
+
+Returns the list of plugin modules attached to this agent (deduplicated).
+
+<ResponseField name="return" type="[module()]">
+  List of plugin modules
+</ResponseField>
+
+**Example:**
+
+```elixir
+MyAgent.plugins()
+# => [SlackPlugin, OpenAIPlugin]
+```
+
+### `plugin_specs/0`
+
+Returns the list of plugin specs attached to this agent.
+
+### `plugin_instances/0`
+
+Returns the list of plugin instances attached to this agent.
+
+### `actions/0`
+
+Returns the list of actions from all attached plugins.
+
+### `capabilities/0`
+
+Returns the union of all capabilities from all mounted plugin instances.
+
+<ResponseField name="return" type="[atom()]">
+  List of capability atoms
+</ResponseField>
+
+**Example:**
+
+```elixir
+MyAgent.capabilities()
+# => [:messaging, :channel_management, :chat, :embeddings]
+```
+
+### `signal_types/0`
+
+Returns all expanded route signal types from plugin routes.
+
+<ResponseField name="return" type="[String.t()]">
+  Fully-prefixed signal types the agent can handle
+</ResponseField>
+
+**Example:**
+
+```elixir
+MyAgent.signal_types()
+# => ["slack.post", "slack.channels.list", "openai.chat", ...]
+```
+
+### `plugin_routes/0`
+
+Returns the expanded and validated plugin routes.
+
+### `plugin_schedules/0`
+
+Returns the expanded plugin and agent schedules.
+
+### `plugin_config/1`
+
+Returns the configuration for a specific plugin.
+
+<ParamField path="plugin" type="module() | {module(), atom()}" required>
+  Plugin module or `{module, alias}` for multi-instance plugins
+</ParamField>
+
+<ResponseField name="return" type="map() | nil">
+  Plugin configuration or nil
+</ResponseField>
+
+### `plugin_state/2`
+
+Returns the state slice for a specific plugin.
+
+<ParamField path="agent" type="Jido.Agent.t()" required>
+  The agent
+</ParamField>
+
+<ParamField path="plugin" type="module() | {module(), atom()}" required>
+  Plugin module or `{module, alias}` for multi-instance plugins
+</ParamField>
+
+<ResponseField name="return" type="map() | nil">
+  Plugin state or nil
+</ResponseField>
+
+## Strategy Functions
+
+### `strategy/0`
+
+Returns the execution strategy module for this agent.
+
+<ResponseField name="return" type="module()">
+  Strategy module
+</ResponseField>
+
+### `strategy_opts/0`
+
+Returns the strategy options for this agent.
+
+<ResponseField name="return" type="keyword()">
+  Strategy options
+</ResponseField>
+
+## Callbacks
+
+These callbacks can be implemented to customize agent behavior:
+
+### `on_before_cmd/2`
+
+Called before command processing.
+
+<ParamField path="agent" type="Jido.Agent.t()" required>
+  The agent
+</ParamField>
+
+<ParamField path="action" type="term()" required>
+  The action about to be executed
+</ParamField>
+
+<ResponseField name="return" type="{:ok, Jido.Agent.t(), term()}">
+  Transformed agent and action
+</ResponseField>
+
+**Use cases:**
+- Mirror action params into agent state
+- Add default params that depend on current state
+- Enforce invariants or guards before execution
+
+### `on_after_cmd/3`
+
+Called after command processing.
+
+<ParamField path="agent" type="Jido.Agent.t()" required>
+  The agent
+</ParamField>
+
+<ParamField path="action" type="term()" required>
+  The action that was executed
+</ParamField>
+
+<ParamField path="directives" type="[directive()]" required>
+  The directives from execution
+</ParamField>
+
+<ResponseField name="return" type="{:ok, Jido.Agent.t(), [directive()]}">
+  Transformed agent and directives
+</ResponseField>
+
+**Use cases:**
+- Auto-validate state after changes
+- Derive computed fields
+- Add invariant checks
+
+### `signal_routes/0` and `signal_routes/1`
+
+Returns signal routes for this agent.
+
+<ResponseField name="return" type="[route_spec()]">
+  List of route specifications
+</ResponseField>
+
+**Route Formats:**
+- `{path, ActionModule}` - Simple mapping (priority 0)
+- `{path, ActionModule, priority}` - With priority
+- `{path, {ActionModule, %{static: params}}}` - With static params
+- `{path, match_fn, ActionModule}` - With pattern matching
+- `{path, match_fn, ActionModule, priority}` - Full spec
+
+**Example:**
+
+```elixir
+use Jido.Agent,
+  name: "my_agent",
+  signal_routes: [
+    {"user.created", HandleUserCreatedAction},
+    {"counter.increment", IncrementAction},
+    {"payment.*", fn s -> s.data.amount > 100 end, LargePaymentAction, 10}
+  ]
+```
+
+### `checkpoint/2`
+
+Serializes the agent for persistence.
+
+<ParamField path="agent" type="Jido.Agent.t()" required>
+  The agent to serialize
+</ParamField>
+
+<ParamField path="ctx" type="map()" required>
+  Context map (may contain jido instance, options)
+</ParamField>
+
+<ResponseField name="return" type="{:ok, map()} | {:error, term()}">
+  Serializable data or error
+</ResponseField>
+
+### `restore/2`
+
+Restores an agent from persisted data.
+
+<ParamField path="data" type="map()" required>
+  The persisted data (from checkpoint/2)
+</ParamField>
+
+<ParamField path="ctx" type="map()" required>
+  Context map
+</ParamField>
+
+<ResponseField name="return" type="{:ok, Jido.Agent.t()} | {:error, term()}">
+  Restored agent or error
+</ResponseField>
+
+## Directives
+
+Directives are effect descriptions for the runtime to interpret. They are **strictly outbound**.
+
+Built-in directives:
+
+- `%Directive.Emit{}` - Dispatch a signal via `Jido.Signal.Dispatch`
+- `%Directive.Error{}` - Signal an error
+- `%Directive.Spawn{}` - Spawn a child process
+- `%Directive.Schedule{}` - Schedule a delayed message
+- `%Directive.RunInstruction{}` - Execute an instruction at runtime
+- `%Directive.Stop{}` - Stop the agent process
+
+**Example:**
+
+```elixir
+# Emit with default dispatch config
+%Directive.Emit{signal: my_signal}
+
+# Emit to PubSub topic
+%Directive.Emit{signal: my_signal, dispatch: {:pubsub, topic: "events"}}
+
+# Emit to a specific process
+%Directive.Emit{signal: my_signal, dispatch: {:pid, target: pid}}
+```
+
+## Base Module Functions
+
+These functions can be used without defining a custom agent module:
+
+### `Jido.Agent.new/1`
+
+Creates a new agent from attributes.
+
+<ParamField path="attrs" type="map() | keyword()" required>
+  Agent attributes
+</ParamField>
+
+<ResponseField name="return" type="{:ok, Jido.Agent.t()} | {:error, term()}">
+  New agent or error
+</ResponseField>
+
+### `Jido.Agent.set/2`
+
+Updates agent state by merging new attributes.
+
+### `Jido.Agent.validate/2`
+
+Validates agent state against its schema.
+
+### `Jido.Agent.schema/0`
+
+Returns the Zoi schema for Agent.

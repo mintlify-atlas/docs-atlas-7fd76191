@@ -1,0 +1,337 @@
+---
+title: Strategies
+description: Learn about execution strategies that control how agents execute actions
+---
+
+Strategies control **how agents execute actions** in `cmd/2`. They enable different execution patterns without changing agent logic.
+
+## What Strategies Control
+
+Strategies can implement:
+
+- Sequential execution (Direct)
+- State machines (FSM)
+- Behavior trees
+- LLM chains of thought
+- Custom execution patterns
+
+<Note>
+Strategies determine the **how** of execution, while agents define the **what** through their actions and schema.
+</Note>
+
+## Built-in Strategies
+
+### Direct (Default)
+
+Executes actions immediately and sequentially:
+
+```elixir
+use Jido.Agent,
+  name: "my_agent",
+  strategy: Jido.Agent.Strategy.Direct
+```
+
+**Characteristics:**
+- No state machine overhead
+- Actions execute in order
+- Minimal strategy state
+- Best for simple request/response patterns
+
+### FSM
+
+Finite state machine with explicit transitions:
+
+```elixir
+use Jido.Agent,
+  name: "fsm_agent",
+  strategy: {Jido.Agent.Strategy.FSM,
+    initial_state: "idle",
+    transitions: %{
+      "idle" => ["processing"],
+      "processing" => ["idle", "completed", "failed"],
+      "completed" => ["idle"],
+      "failed" => ["idle"]
+    }
+  }
+```
+
+**Characteristics:**
+- Explicit state transitions
+- Prevents invalid state changes
+- Keeps `cmd/2` pure via `%Directive.RunInstruction{}`
+- Best for multi-step workflows
+
+<Tip>
+FSM keeps `cmd/2` pure by emitting `%Directive.RunInstruction{}` for runtime execution and handling results via internal strategy actions.
+</Tip>
+
+## Snapshot Interface
+
+Get a stable view of strategy state:
+
+```elixir
+snap = MyAgent.strategy_snapshot(agent)
+
+snap.status   # :idle, :running, :waiting, :success, :failure
+snap.done?    # true if terminal state
+snap.result   # main output if any
+snap.details  # additional metadata
+```
+
+### Snapshot Fields
+
+<ParamField path="status" type="atom">
+  Coarse execution status: `:idle`, `:running`, `:waiting`, `:success`, `:failure`
+</ParamField>
+
+<ParamField path="done?" type="boolean">
+  Whether the strategy has reached a terminal state
+</ParamField>
+
+<ParamField path="result" type="any">
+  The main output if the strategy produces one
+</ParamField>
+
+<ParamField path="details" type="map">
+  Additional strategy-specific metadata
+</ParamField>
+
+## Implementing Custom Strategies
+
+```elixir
+defmodule MyCustomStrategy do
+  use Jido.Agent.Strategy
+
+  @impl true
+  def cmd(agent, instructions, ctx) do
+    # Custom execution logic
+    # Must return {updated_agent, directives}
+  end
+
+  # Optional callbacks
+  @impl true
+  def init(agent, ctx), do: {agent, []}
+
+  @impl true
+  def tick(agent, ctx), do: {agent, []}
+
+  @impl true
+  def snapshot(agent, ctx), do: Jido.Agent.Strategy.default_snapshot(agent)
+end
+```
+
+Strategy state lives in `agent.state.__strategy__`. Use `Jido.Agent.Strategy.State` helpers for manipulation.
+
+### Strategy Callbacks
+
+<ParamField path="cmd/3" type="callback" required>
+  Execute instructions against the agent. Called by `MyAgent.cmd/2` after normalization.
+  
+  ```elixir
+  def cmd(agent, instructions, ctx) do
+    # Return {updated_agent, directives}
+  end
+  ```
+</ParamField>
+
+<ParamField path="init/2" type="callback">
+  Initialize strategy-specific state for a freshly created Agent. Called by both `MyAgent.new/1` and `AgentServer` during startup.
+  
+  ```elixir
+  def init(agent, ctx), do: {agent, []}
+  ```
+</ParamField>
+
+<ParamField path="tick/2" type="callback">
+  Tick-based continuation for multi-step or long-running strategies. Called when strategy schedules `{:schedule, ms, :strategy_tick}`.
+  
+  ```elixir
+  def tick(agent, ctx), do: {agent, []}
+  ```
+</ParamField>
+
+<ParamField path="snapshot/2" type="callback">
+  Returns a stable snapshot of the strategy state. Default implementation uses `Strategy.State` helpers.
+  
+  ```elixir
+  def snapshot(agent, ctx), do: Strategy.default_snapshot(agent)
+  ```
+</ParamField>
+
+<ParamField path="signal_routes/1" type="callback">
+  Declares signal routes handled by this strategy. Returns list of route specs that map signal types to strategy commands.
+  
+  ```elixir
+  def signal_routes(_ctx) do
+    [
+      {"react.user_query", {:strategy_cmd, :react_start}},
+      {"ai.llm_result", {:strategy_cmd, :react_llm_result}}
+    ]
+  end
+  ```
+</ParamField>
+
+## Signal Routes
+
+Strategies define signal-to-action routing via `signal_routes/1`:
+
+```elixir
+@impl true
+def signal_routes(_ctx) do
+  [
+    {"react.user_query", {:strategy_cmd, :react_start}},
+    {"ai.llm_result", {:strategy_cmd, :react_llm_result}}
+  ]
+end
+```
+
+This enables strategies to intercept signals and route them to internal handlers.
+
+### Route Targets
+
+<ParamField path="{:strategy_cmd, action}" type="tuple">
+  Call `cmd(agent, [{action, signal.data}])`
+</ParamField>
+
+<ParamField path="{:strategy_tick}" type="tuple">
+  Schedule a strategy tick
+</ParamField>
+
+<ParamField path="{:custom, term}" type="tuple">
+  Custom handling (for extension)
+</ParamField>
+
+## When to Use FSM vs Direct
+
+| Use Case | Strategy | Why |
+|----------|----------|-----|
+| Simple request/response | Direct | No state machine overhead |
+| Multi-step workflows | FSM | Explicit transitions prevent invalid states |
+| Stateless actions | Direct | No state to track between calls |
+| User-driven flows (wizards, onboarding) | FSM | Natural fit for step-by-step progression |
+| Background jobs | Direct | Execute and complete in one pass |
+| Long-running processes with pauses | FSM | Can persist state and resume |
+| Agents with mode switching | FSM | States represent distinct operational modes |
+
+<Tip>
+**Rule of thumb:** If you need to ask "what step are we on?" or "can we do X right now?", use FSM. If every action is independent, use Direct.
+</Tip>
+
+## Strategy State Management
+
+Strategy state lives under `agent.state.__strategy__`. Use the `Jido.Agent.Strategy.State` module helpers:
+
+```elixir
+alias Jido.Agent.Strategy.State, as: StratState
+
+# Get strategy state
+state = StratState.get(agent, %{})
+
+# Update strategy state
+agent = StratState.set(agent, %{iteration: 1, status: :running})
+
+# Check terminal status
+if StratState.terminal?(agent) do
+  # Strategy is done
+end
+```
+
+### Strategy State Helpers
+
+<ParamField path="StratState.get/2" type="function">
+  Get strategy state with default fallback
+  
+  ```elixir
+  state = StratState.get(agent, %{})
+  ```
+</ParamField>
+
+<ParamField path="StratState.set/2" type="function">
+  Update strategy state
+  
+  ```elixir
+  agent = StratState.set(agent, %{iteration: 1})
+  ```
+</ParamField>
+
+<ParamField path="StratState.status/1" type="function">
+  Get current strategy status
+  
+  ```elixir
+  status = StratState.status(agent)
+  ```
+</ParamField>
+
+<ParamField path="StratState.terminal?/1" type="function">
+  Check if strategy reached terminal state
+  
+  ```elixir
+  done = StratState.terminal?(agent)
+  ```
+</ParamField>
+
+## Complete Example
+
+```elixir
+defmodule MyApp.TickStrategy do
+  use Jido.Agent.Strategy
+  
+  alias Jido.Agent.Strategy.State, as: StratState
+  alias Jido.Agent.Directive
+
+  @impl true
+  def init(agent, _ctx) do
+    agent = StratState.set(agent, %{ticks: 0, status: :idle})
+    {agent, []}
+  end
+
+  @impl true
+  def cmd(agent, instructions, _ctx) do
+    # Execute instructions and schedule next tick
+    {agent, directives} = execute_instructions(agent, instructions)
+    
+    state = StratState.get(agent, %{})
+    new_state = Map.update!(state, :ticks, &(&1 + 1))
+    agent = StratState.set(agent, new_state)
+    
+    if new_state.ticks < 10 do
+      {agent, directives ++ [Directive.schedule(1000, :strategy_tick)]}
+    else
+      agent = StratState.set(agent, Map.put(new_state, :status, :success))
+      {agent, directives}
+    end
+  end
+
+  @impl true
+  def tick(agent, _ctx) do
+    # Continue execution on next tick
+    state = StratState.get(agent, %{})
+    IO.puts("Tick #{state.ticks}")
+    {agent, []}
+  end
+
+  @impl true
+  def snapshot(agent, _ctx) do
+    state = StratState.get(agent, %{})
+    
+    %Jido.Agent.Strategy.Snapshot{
+      status: state.status,
+      done?: state.status in [:success, :failure],
+      result: state.ticks,
+      details: %{max_ticks: 10}
+    }
+  end
+  
+  defp execute_instructions(agent, instructions) do
+    # Execute each instruction and collect directives
+    # ...
+  end
+end
+```
+
+## Related Guides
+
+- [Agents](/concepts/agents) — Core agent concepts and the `cmd/2` contract
+- [Directives](/concepts/directives) — RunInstruction and other directives
+- [State Operations](/concepts/state-operations) — State transitions in strategies
+- [Signals](/concepts/signals) — Strategy signal routing

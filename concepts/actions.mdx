@@ -1,0 +1,367 @@
+---
+title: Actions
+description: Learn how to implement Actions that transform agent state and emit directives
+---
+
+Actions receive validated params and context, then return state updates and optional directives. Actions may perform side effects (API calls, file I/O, database queries).
+
+## Complete Example
+
+```elixir
+defmodule MyApp.Actions.CreateOrder do
+  use Jido.Action,
+    name: "create_order",
+    description: "Creates an order and emits a domain event",
+    schema: [
+      order_id: [type: :string, required: true],
+      items: [type: {:list, :map}, default: []],
+      total: [type: :integer, required: true]
+    ]
+
+  alias Jido.Agent.Directive
+  alias Jido.Signal
+
+  def run(params, context) do
+    orders = Map.get(context.state, :orders, [])
+
+    order = %{
+      id: params.order_id,
+      items: params.items,
+      total: params.total,
+      status: :pending,
+      created_at: DateTime.utc_now()
+    }
+
+    signal = Signal.new!(
+      "order.created",
+      %{order_id: order.id, total: order.total},
+      source: "/order-agent"
+    )
+
+    {:ok, %{orders: [order | orders], last_order_id: order.id},
+     %Directive.Emit{signal: signal}}
+  end
+end
+```
+
+## The run/2 Contract
+
+Every action implements `run/2`:
+
+```elixir
+def run(params, context) do
+  # params: validated map matching your schema
+  # context: map with :state (current agent state)
+  
+  {:ok, state_updates}
+end
+```
+
+### Parameters
+
+<ParamField path="params" type="map()">
+  Validated map with your schema fields. Missing optional fields get their defaults:
+  
+  ```elixir
+  def run(%{amount: amount}, context) do
+    # amount is guaranteed to be an integer (from schema)
+  end
+  ```
+</ParamField>
+
+<ParamField path="context" type="map()">
+  Context map containing:
+  
+  | Key | Value |
+  |-----|-------|
+  | `:state` | Current agent state as a map |
+  | `:agent` | The agent struct (when running via `emit_to_parent`) |
+</ParamField>
+
+## Return Shapes
+
+Actions return one of three shapes:
+
+### State updates only
+
+```elixir
+def run(%{amount: amount}, context) do
+  current = Map.get(context.state, :counter, 0)
+  {:ok, %{counter: current + amount}}
+end
+```
+
+The returned map is deep-merged into agent state.
+
+### State updates with directives
+
+```elixir
+def run(params, context) do
+  signal = Signal.new!("task.completed", %{id: params.id}, source: "/worker")
+  
+  {:ok, %{status: :done}, %Directive.Emit{signal: signal}}
+end
+```
+
+Return a single directive or a list:
+
+```elixir
+{:ok, %{triggered: true}, [
+  Directive.emit(%{type: "event.1"}),
+  Directive.schedule(1000, :check)
+]}
+```
+
+### Errors
+
+```elixir
+def run(%{file_path: path}, _context) do
+  case File.read(path) do
+    {:ok, content} -> {:ok, %{content: content}}
+    {:error, reason} -> {:error, "Failed to read file: #{inspect(reason)}"}
+  end
+end
+```
+
+<Warning>
+When returning `{:error, reason}`, the agent state is **not** updated. The error is wrapped in a `Directive.Error` for handling by the runtime.
+</Warning>
+
+## Accessing State
+
+Read current agent state from `context.state`:
+
+```elixir
+defmodule IncrementAction do
+  use Jido.Action,
+    name: "increment",
+    schema: [amount: [type: :integer, default: 1]]
+
+  def run(%{amount: amount}, context) do
+    current = Map.get(context.state, :counter, 0)
+    {:ok, %{counter: current + amount}}
+  end
+end
+```
+
+Pattern matching works too:
+
+```elixir
+def run(%{amount: amount}, %{state: %{counter: current}}) do
+  {:ok, %{counter: current + amount}}
+end
+```
+
+## Emitting Directives
+
+Import the Directive module and return directive structs:
+
+```elixir
+alias Jido.Agent.Directive
+
+# Emit a signal
+{:ok, state, %Directive.Emit{signal: my_signal}}
+
+# Schedule a delayed message
+{:ok, state, %Directive.Schedule{delay_ms: 5000, message: :timeout}}
+
+# Spawn a child agent
+{:ok, state, Directive.spawn_agent(WorkerAgent, :worker_1)}
+
+# Multiple directives
+{:ok, state, [
+  %Directive.Emit{signal: signal},
+  %Directive.Schedule{delay_ms: 1000, message: :check}
+]}
+```
+
+### Common Directive Helpers
+
+<ParamField path="Directive.emit/2" type="function">
+  Emit via default dispatch
+  
+  ```elixir
+  Directive.emit(signal)
+  Directive.emit(signal, {:pubsub, topic: "events"})
+  ```
+</ParamField>
+
+<ParamField path="Directive.emit_to_pid/2" type="function">
+  Emit to specific process
+  
+  ```elixir
+  Directive.emit_to_pid(signal, pid)
+  ```
+</ParamField>
+
+<ParamField path="Directive.emit_to_parent/2" type="function">
+  Child → parent communication
+  
+  ```elixir
+  Directive.emit_to_parent(agent, signal)
+  ```
+</ParamField>
+
+<ParamField path="Directive.spawn_agent/3" type="function">
+  Spawn child agent
+  
+  ```elixir
+  Directive.spawn_agent(Module, :tag)
+  Directive.spawn_agent(Module, :tag, opts: %{initial_state: state})
+  ```
+</ParamField>
+
+<ParamField path="Directive.stop_child/2" type="function">
+  Stop tracked child
+  
+  ```elixir
+  Directive.stop_child(:tag, :normal)
+  ```
+</ParamField>
+
+<ParamField path="Directive.schedule/2" type="function">
+  Delayed message
+  
+  ```elixir
+  Directive.schedule(delay_ms, message)
+  ```
+</ParamField>
+
+<ParamField path="Directive.stop/1" type="function">
+  Stop self
+  
+  ```elixir
+  Directive.stop(:normal)
+  ```
+</ParamField>
+
+## State Scope
+
+### Agent State
+
+**Agent state** (`context.state`) is the agent's root state map defined by its schema:
+
+```elixir
+defmodule MyAgent do
+  use Jido.Agent,
+    schema: [
+      counter: [type: :integer, default: 0],
+      orders: [type: {:list, :map}, default: []]
+    ]
+end
+
+# context.state = %{counter: 0, orders: []}
+```
+
+### State Merging
+
+**State updates** from actions are deep-merged into agent state:
+
+```elixir
+# If agent state is %{counter: 5, name: "test"}
+# And action returns {:ok, %{counter: 10}}
+# Result: %{counter: 10, name: "test"}
+```
+
+### Plugin State
+
+**Plugin state** (if using plugins) lives under a namespaced key:
+
+```elixir
+# Agent with :chat plugin mounted
+# agent.state = %{counter: 0, chat: %{history: []}}
+```
+
+Actions updating plugin state should target the plugin's key:
+
+```elixir
+{:ok, %{chat: %{history: updated_history}}}
+```
+
+## StateOps for Complex Updates
+
+For operations beyond simple merge, return StateOp structs:
+
+```elixir
+alias Jido.Agent.StateOp
+
+# Deep merge (default behavior)
+{:ok, %{}, %StateOp.SetState{attrs: %{metadata: %{key: "value"}}}}
+
+# Replace entire state
+{:ok, %{}, %StateOp.ReplaceState{state: %{fresh: true}}}
+
+# Delete top-level keys
+{:ok, %{}, %StateOp.DeleteKeys{keys: [:temp, :cache]}}
+
+# Set nested path
+{:ok, %{}, %StateOp.SetPath{path: [:nested, :deep, :value], value: 42}}
+
+# Delete nested path
+{:ok, %{}, %StateOp.DeletePath{path: [:nested, :to_remove]}}
+```
+
+<Tip>
+See the [State Operations guide](/concepts/state-operations) for detailed examples of when and how to use each StateOp.
+</Tip>
+
+## Schema Definition
+
+Schemas use NimbleOptions syntax:
+
+```elixir
+use Jido.Action,
+  name: "process_order",
+  description: "Processes an order with validation",
+  schema: [
+    order_id: [type: :string, required: true],
+    amount: [type: :integer, default: 1],
+    priority: [type: {:in, [:low, :medium, :high]}, default: :medium],
+    metadata: [type: :map, default: %{}],
+    tags: [type: {:list, :string}, default: []]
+  ]
+```
+
+### Common Schema Options
+
+<ParamField path="type" type="atom | tuple">
+  - `:string`, `:integer`, `:atom`, `:map`
+  - `{:list, :type}`, `{:in, values}`
+</ParamField>
+
+<ParamField path="required" type="boolean">
+  Validation fails if missing
+</ParamField>
+
+<ParamField path="default" type="any">
+  Used when param not provided
+</ParamField>
+
+<ParamField path="doc" type="string">
+  Documents the parameter
+</ParamField>
+
+## Invoking Actions
+
+From `cmd/2`:
+
+```elixir
+# Module only (uses defaults)
+{agent, directives} = MyAgent.cmd(agent, IncrementAction)
+
+# Module with params
+{agent, directives} = MyAgent.cmd(agent, {IncrementAction, %{amount: 5}})
+
+# Multiple actions
+{agent, directives} = MyAgent.cmd(agent, [
+  {IncrementAction, %{amount: 10}},
+  {DecrementAction, %{amount: 3}}
+])
+```
+
+## Related Guides
+
+- [Agents](/concepts/agents) — Core agent concepts and the `cmd/2` contract
+- [Directives](/concepts/directives) — Complete directive reference
+- [State Operations](/concepts/state-operations) — Advanced state manipulation
+- [Signals](/concepts/signals) — Signal routing and dispatch

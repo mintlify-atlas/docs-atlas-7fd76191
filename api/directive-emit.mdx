@@ -1,0 +1,239 @@
+---
+title: "Emit Directive"
+description: "Dispatch signals via Jido.Signal.Dispatch"
+---
+
+## Overview
+
+The **Emit** directive dispatches a signal via `Jido.Signal.Dispatch`. The runtime interprets this directive by calling:
+
+```elixir
+Jido.Signal.Dispatch.dispatch(signal, dispatch_config)
+```
+
+## Integration with Jido.Signal
+
+The Emit directive integrates with `Jido.Signal` and `Jido.Signal.Dispatch`:
+- Signals are dispatched via configured adapters (pid, pubsub, bus, http, etc.)
+- Dispatch configuration can be specified per-directive or use agent defaults
+- Multiple dispatch targets are supported
+
+## Struct Fields
+
+<ParamField path="signal" type="Jido.Signal.t()" required>
+  A `Jido.Signal.t()` struct to dispatch.
+</ParamField>
+
+<ParamField path="dispatch" type="term()">
+  Dispatch configuration. Can be:
+  - `{adapter, opts}` - Single dispatch target
+  - `[{adapter, opts}, ...]` - Multiple dispatch targets
+  - `nil` - Use agent's default dispatch
+  
+  Available adapters:
+  - `:pid` - Direct to process
+  - `:pubsub` - Via PubSub
+  - `:bus` - To signal bus
+  - `:http` / `:webhook` - HTTP endpoints
+  - `:logger` / `:console` / `:noop` - Logging/testing
+</ParamField>
+
+## Default Dispatch Behavior
+
+If `dispatch` is omitted and the agent has no `default_dispatch`, the runtime falls back to emitting to the current agent process (`self()`).
+
+## Usage Examples
+
+### Basic Usage
+
+```elixir
+alias Jido.Agent.Directive
+
+# Use agent's default dispatch (configured on AgentServer)
+%Directive.Emit{signal: signal}
+
+# Or use the helper function
+Directive.emit(signal)
+```
+
+### Explicit Dispatch to PubSub
+
+```elixir
+# Struct form
+%Directive.Emit{
+  signal: signal,
+  dispatch: {:pubsub, topic: "events"}
+}
+
+# Helper function
+Directive.emit(signal, {:pubsub, topic: "events"})
+```
+
+### Multiple Dispatch Targets
+
+```elixir
+%Directive.Emit{
+  signal: signal,
+  dispatch: [
+    {:pubsub, topic: "events"},
+    {:logger, level: :info}
+  ]
+}
+```
+
+### Direct to Process (PID)
+
+```elixir
+%Directive.Emit{
+  signal: signal,
+  dispatch: {:pid, target: worker_pid}
+}
+
+# Using helper function
+Directive.emit_to_pid(signal, worker_pid)
+```
+
+### Emit to Parent Agent
+
+```elixir
+defmodule WorkerAction do
+  use Jido.Action, name: "worker.process", schema: []
+
+  def run(_params, context) do
+    result_signal = Signal.new!(
+      "worker.completed",
+      %{status: :success, value: 42},
+      source: "/worker"
+    )
+    
+    directive = Directive.emit_to_parent(context.agent, result_signal)
+    {:ok, %{}, List.wrap(directive)}
+  end
+end
+```
+
+<Note>
+  `emit_to_parent/3` returns `nil` if the agent has no parent. Use `List.wrap/1` to safely handle this case.
+</Note>
+
+## Helper Functions
+
+### emit/2
+
+```elixir
+@spec emit(term(), term()) :: Emit.t()
+```
+
+Creates an Emit directive.
+
+```elixir
+Directive.emit(signal)
+Directive.emit(signal, {:pubsub, topic: "events"})
+```
+
+### emit_to_pid/3
+
+```elixir
+@spec emit_to_pid(term(), pid(), Keyword.t()) :: Emit.t()
+```
+
+Creates an Emit directive targeting a specific process by PID.
+
+```elixir
+Directive.emit_to_pid(signal, some_pid)
+Directive.emit_to_pid(signal, worker_pid, delivery_mode: :sync, timeout: 10_000)
+```
+
+Options:
+- `:delivery_mode` - `:async` (default) or `:sync`
+- `:timeout` - Timeout for sync delivery (default: 5000)
+
+### emit_to_parent/3
+
+```elixir
+@spec emit_to_parent(struct(), term(), Keyword.t()) :: Emit.t() | nil
+```
+
+Creates an Emit directive targeting the agent's parent.
+
+```elixir
+Directive.emit_to_parent(agent, signal)
+Directive.emit_to_parent(agent, signal, delivery_mode: :sync)
+```
+
+Returns `nil` if the agent has no parent (i.e., no `__parent__` field in state).
+
+## Return from cmd/2
+
+```elixir
+def cmd(agent, action, ctx) do
+  # Process action
+  new_state = process_action(agent.state, action)
+  agent = %{agent | state: new_state}
+  
+  # Emit result signal
+  result_signal = Signal.new!(
+    "action.completed",
+    %{result: :success},
+    source: "/agent/#{agent.id}"
+  )
+  
+  directives = [Directive.emit(result_signal)]
+  
+  {agent, directives}
+end
+```
+
+## Multi-Agent Communication
+
+Emit directives enable communication between agents:
+
+```elixir
+# Parent spawns child
+def cmd(agent, :spawn_worker, _ctx) do
+  directives = [
+    Directive.spawn_agent(WorkerAgent, :worker_1)
+  ]
+  {agent, directives}
+end
+
+# Child emits to parent
+defmodule WorkerAgent do
+  use Jido.Agent, name: "worker"
+  
+  def cmd(agent, :work_done, _ctx) do
+    result = Signal.new!("work.result", %{value: 42})
+    directives = [Directive.emit_to_parent(agent, result)]
+    {agent, directives}
+  end
+end
+
+# Parent receives result
+def cmd(agent, %Signal{type: "work.result"}, _ctx) do
+  # Handle result from child
+  {agent, []}
+end
+```
+
+## Schema
+
+```elixir
+@schema Zoi.struct(
+  Jido.Agent.Directive.Emit,
+  %{
+    signal: Zoi.any(description: "Jido.Signal.t() to dispatch"),
+    dispatch: Zoi.any(description: "Dispatch config: {adapter, opts} or list")
+      |> Zoi.optional()
+  },
+  coerce: true
+)
+```
+
+## Type
+
+```elixir
+@type t :: %__MODULE__{
+  signal: term(),
+  dispatch: term() | nil
+}
+```

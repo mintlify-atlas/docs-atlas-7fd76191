@@ -1,0 +1,193 @@
+---
+title: "Telemetry"
+description: "Production-ready telemetry for Jido operations"
+---
+
+## Overview
+
+Production-ready telemetry for Jido Agent operations. Provides structured, scannable logging with intelligent filtering to reduce noise while preserving actionable debugging information.
+
+## Log Levels
+
+The telemetry system uses three effective log levels:
+
+- **INFO** - Developer narrative for user-facing interactions (request start/stop)
+- **DEBUG** - Interesting events only (slow operations, signals with directives, errors)
+- **TRACE** - Fine-grained internal churn (every signal/directive) - opt-in via config
+
+## Configuration
+
+Configure via application environment:
+
+```elixir
+config :jido, :telemetry,
+  log_level: :debug,                    # :trace | :debug | :info
+  slow_signal_threshold_ms: 10,         # Log signals slower than this
+  slow_directive_threshold_ms: 5,       # Log directives slower than this
+  interesting_signal_types: [           # Always log these signal types
+    "jido.agent.user_request",
+    "jido.tool.result",
+    "jido.llm.done"
+  ],
+  log_prompts: false,                   # Privacy: don't log LLM prompts
+  log_tool_args: :keys_only             # :keys_only | :full | :none
+```
+
+## "Interestingness" Filtering
+
+At DEBUG level, signals are only logged if they are "interesting":
+
+- Duration exceeds `slow_signal_threshold_ms`
+- Produced one or more directives
+- Signal type is in `interesting_signal_types`
+- An error occurred
+
+This reduces log spam from high-frequency internal signals while preserving visibility into operations that matter.
+
+## Structured Output
+
+All log entries include structured metadata for filtering and correlation:
+
+- `trace_id`, `span_id` - For distributed tracing
+- `agent_id`, `agent_module` - Agent identification
+- `signal_type`, `directive_count`, `directive_types` - What happened
+- `duration` - Formatted timing (e.g., "12.3ms")
+
+## Events
+
+### Agent Events
+
+- `[:jido, :agent, :cmd, :start]` - Agent command execution started
+- `[:jido, :agent, :cmd, :stop]` - Agent command execution completed
+- `[:jido, :agent, :cmd, :exception]` - Agent command execution failed
+
+### AgentServer Events
+
+- `[:jido, :agent_server, :signal, :start]` - Signal processing started
+- `[:jido, :agent_server, :signal, :stop]` - Signal processing completed
+- `[:jido, :agent_server, :signal, :exception]` - Signal processing failed
+- `[:jido, :agent_server, :directive, :start]` - Directive execution started
+- `[:jido, :agent_server, :directive, :stop]` - Directive execution completed
+- `[:jido, :agent_server, :directive, :exception]` - Directive execution failed
+- `[:jido, :agent_server, :queue, :overflow]` - Directive queue overflow
+
+### Strategy Events
+
+- `[:jido, :agent, :strategy, :init, :start]` - Strategy initialization started
+- `[:jido, :agent, :strategy, :init, :stop]` - Strategy initialization completed
+- `[:jido, :agent, :strategy, :init, :exception]` - Strategy initialization failed
+- `[:jido, :agent, :strategy, :cmd, :start]` - Strategy command execution started
+- `[:jido, :agent, :strategy, :cmd, :stop]` - Strategy command execution completed
+- `[:jido, :agent, :strategy, :cmd, :exception]` - Strategy command execution failed
+- `[:jido, :agent, :strategy, :tick, :start]` - Strategy tick started
+- `[:jido, :agent, :strategy, :tick, :stop]` - Strategy tick completed
+- `[:jido, :agent, :strategy, :tick, :exception]` - Strategy tick failed
+
+## Functions
+
+### setup/0
+
+Attaches telemetry handlers. Idempotent — safe to call multiple times. Called from application startup.
+
+```elixir
+Jido.Telemetry.setup()
+```
+
+### metrics/0
+
+Returns telemetry metric definitions with automatic per-instance scoping. Wire these into your reporter in your application.
+
+```elixir
+TelemetryMetricsPrometheus.init(Jido.Telemetry.metrics())
+```
+
+**Available metrics:**
+
+- `jido.agent.cmd.stop.count` - Total agent commands executed
+- `jido.agent.cmd.stop.duration` - Agent command duration summary
+- `jido.agent_server.signal.stop.count` - Total signals processed
+- `jido.agent_server.signal.stop.duration` - Signal processing duration summary
+- `jido.agent_server.directive.stop.count` - Total directives executed
+- `jido.agent_server.queue.overflow.count` - Queue overflow count
+
+### handle_event/4
+
+Handles telemetry events for agent and strategy operations. Uses intelligent filtering to reduce noise while preserving actionable information.
+
+```elixir
+@spec handle_event(event_name(), measurements(), metadata(), config :: term()) :: :ok
+```
+
+## Usage Example
+
+```elixir
+defmodule MyApp.Application do
+  use Application
+
+  def start(_type, _args) do
+    # Setup telemetry
+    :ok = Jido.Telemetry.setup()
+
+    # Optional: Setup metrics reporter
+    {:ok, _} = TelemetryMetricsPrometheus.start_link(
+      metrics: Jido.Telemetry.metrics(),
+      port: 9568
+    )
+
+    children = [
+      # Your supervision tree
+    ]
+
+    opts = [strategy: :one_for_one, name: MyApp.Supervisor]
+    Supervisor.start_link(children, opts)
+  end
+end
+```
+
+## Custom Event Handlers
+
+```elixir
+defmodule MyApp.CustomTelemetry do
+  def attach do
+    :telemetry.attach(
+      "my-custom-handler",
+      [:jido, :agent, :cmd, :stop],
+      &handle_agent_cmd/4,
+      nil
+    )
+  end
+
+  def handle_agent_cmd(_event, measurements, metadata, _config) do
+    # Custom handling
+    duration_ms = System.convert_time_unit(measurements.duration, :native, :millisecond)
+    
+    MyApp.Metrics.record(
+      agent: metadata.agent_id,
+      action: metadata.action,
+      duration: duration_ms
+    )
+  end
+end
+```
+
+## Log Output Examples
+
+**Agent command:**
+```
+[debug] [agent.cmd] MyApp.Worker action=process_data directives=2 duration=15.3ms
+```
+
+**Signal processing:**
+```
+[debug] [signal] type=user.request directives=3 duration=8.1ms
+```
+
+**Directive execution:**
+```
+[debug] [directive] type=Emit result=ok duration=1.2ms
+```
+
+**Error:**
+```
+[warn] [agent.cmd.error] MyApp.Worker action=process_data error=%ValidationError{...} duration=2.5ms
+```
