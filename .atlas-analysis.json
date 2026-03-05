@@ -1,0 +1,198 @@
+{
+  "projectType": "framework",
+  "projectName": "Jido",
+  "projectDescription": "Pure functional agents and OTP runtime for building autonomous multi-agent workflows in Elixir",
+  "theme": "aspen",
+  "primaryColor": "#8B5CF6",
+  "lightColor": "#C4B5FD",
+  "darkColor": "#6D28D9",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation",
+              "core-concepts"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/agents",
+              "concepts/actions",
+              "concepts/signals",
+              "concepts/directives",
+              "concepts/state-operations",
+              "concepts/strategies"
+            ]
+          },
+          {
+            "group": "Building Agents",
+            "pages": [
+              "guides/defining-agents",
+              "guides/plugins",
+              "guides/sensors",
+              "guides/runtime"
+            ]
+          },
+          {
+            "group": "Orchestration",
+            "pages": [
+              "orchestration/multi-agent",
+              "orchestration/coordination",
+              "orchestration/scheduling"
+            ]
+          },
+          {
+            "group": "Operations",
+            "pages": [
+              "operations/testing",
+              "operations/debugging",
+              "operations/observability",
+              "operations/persistence",
+              "operations/worker-pools",
+              "operations/configuration"
+            ]
+          },
+          {
+            "group": "Advanced",
+            "pages": [
+              "advanced/fsm-strategy",
+              "advanced/custom-strategies",
+              "advanced/error-handling",
+              "advanced/discovery"
+            ]
+          },
+          {
+            "group": "Integrations",
+            "pages": [
+              "integrations/phoenix",
+              "integrations/ash"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Core API",
+            "pages": [
+              "api/jido",
+              "api/agent",
+              "api/agent-server",
+              "api/await"
+            ]
+          },
+          {
+            "group": "Strategies",
+            "pages": [
+              "api/strategy",
+              "api/strategy-direct",
+              "api/strategy-fsm"
+            ]
+          },
+          {
+            "group": "Directives",
+            "pages": [
+              "api/directive",
+              "api/directive-emit",
+              "api/directive-spawn",
+              "api/directive-stop",
+              "api/directive-schedule"
+            ]
+          },
+          {
+            "group": "State Operations",
+            "pages": [
+              "api/state-op",
+              "api/state-ops"
+            ]
+          },
+          {
+            "group": "Plugins & Sensors",
+            "pages": [
+              "api/plugin",
+              "api/sensor"
+            ]
+          },
+          {
+            "group": "Built-in Actions",
+            "pages": [
+              "api/actions-control",
+              "api/actions-lifecycle",
+              "api/actions-scheduling",
+              "api/actions-status"
+            ]
+          },
+          {
+            "group": "Utilities",
+            "pages": [
+              "api/error",
+              "api/storage",
+              "api/telemetry",
+              "api/discovery"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Resources",
+        "groups": [
+          {
+            "group": "Resources",
+            "pages": [
+              "resources/ecosystem",
+              "resources/migration",
+              "resources/contributing",
+              "resources/changelog"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Pure functional agent architecture with immutable state",
+    "Directive-based effect system separating logic from side effects",
+    "OTP runtime integration with GenServer-based AgentServer",
+    "Composable plugin system for reusable capabilities",
+    "Multiple execution strategies (Direct, FSM) with extensible protocol",
+    "Multi-agent orchestration with parent-child hierarchies",
+    "Signal routing and CloudEvents-based messaging",
+    "Declarative cron scheduling and worker pools",
+    "Schema validation with NimbleOptions and Zoi",
+    "Built-in persistence, observability, and debugging tools"
+  ],
+  "publicApiSurface": [
+    "Jido.start_agent/3 - Start an agent under supervision",
+    "Jido.stop_agent/2 - Stop a running agent",
+    "Jido.whereis/2 - Look up agent by ID",
+    "Jido.list_agents/1 - List all running agents",
+    "Jido.await/3 - Wait for agent completion",
+    "Jido.Agent.new/1 - Create agent struct",
+    "Jido.Agent.cmd/2 - Execute actions (core operation)",
+    "Jido.Agent.set/2 - Update agent state",
+    "Jido.Agent.validate/2 - Validate agent state",
+    "Jido.AgentServer.start_link/1 - Start agent GenServer",
+    "Jido.AgentServer.call/3 - Synchronous signal processing",
+    "Jido.AgentServer.cast/2 - Asynchronous signal processing",
+    "Jido.AgentServer.state/1 - Get agent server state",
+    "use Jido.Agent - Define agent modules",
+    "use Jido.Plugin - Define composable plugins",
+    "use Jido.Sensor - Define event sensors",
+    "Jido.Agent.Directive.Emit - Emit signals",
+    "Jido.Agent.Directive.SpawnAgent - Spawn child agents",
+    "Jido.Agent.Directive.Schedule - Schedule delayed actions",
+    "Jido.Agent.Directive.Stop - Stop agent process",
+    "Jido.Agent.Strategy.Direct - Default execution strategy",
+    "Jido.Agent.Strategy.FSM - Finite state machine strategy",
+    "Jido.Persist.hibernate/2 - Persist agent to storage",
+    "Jido.Persist.thaw/3 - Restore agent from storage"
+  ]
+}
